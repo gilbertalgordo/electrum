@@ -20,6 +20,8 @@ task:
            ELECTRUM_PYTHON_VERSION: 3.11
        - env:
            ELECTRUM_PYTHON_VERSION: 3.12
+       - env:
+           ELECTRUM_PYTHON_VERSION: 3.13
        - name: "unittests: Tox Python 3 debug mode"
          env:
            ELECTRUM_PYTHON_VERSION: 3.11
@@ -35,17 +37,26 @@ task:
     - git tag
   install_script:
     - apt-get update
-    - apt-get -y install libsecp256k1-dev
     # qml test reqs:
     - apt-get -y install libgl1 libegl1 libxkbcommon0 libdbus-1-3
     - pip install -r $ELECTRUM_REQUIREMENTS_CI
+  libsecp_build_cache:
+    folder: contrib/_saved_secp256k1_build
+    fingerprint_script: sha256sum ./contrib/make_libsecp256k1.sh
+    populate_script:
+      - apt-get -y install automake libtool
+      - ./contrib/make_libsecp256k1.sh
+      - mkdir contrib/_saved_secp256k1_build
+      - cp electrum/libsecp256k1.so.* contrib/_saved_secp256k1_build/
   tox_script:
     - export PYTHONASYNCIODEBUG
     - export PYTHONDEVMODE
+    - export ELECTRUM_ECC_DONT_COMPILE=1
     - tox
   coveralls_script:
     - if [ ! -z "$COVERALLS_REPO_TOKEN" ] ; then coveralls ; fi
   env:
+    LD_LIBRARY_PATH: contrib/_saved_secp256k1_build/
     ELECTRUM_REQUIREMENTS_CI: contrib/requirements/requirements-ci.txt
     ELECTRUM_REQUIREMENTS: contrib/requirements/requirements.txt
     # following CI_* env vars are set up for coveralls
@@ -99,7 +110,9 @@ task:
     populate_script: mkdir -p /tmp/bitcoind
   install_script:
     - apt-get update
-    - apt-get -y install libsecp256k1-dev curl jq bc
+    - apt-get -y install curl jq bc
+    # install electrum
+    - export ELECTRUM_ECC_DONT_COMPILE=1  # we build manually to make caching it easier
     - pip3 install .[tests]
     # install e-x some commits after 1.16.0 tag
     - pip3 install git+https://github.com/spesmilo/electrumx.git@4e66804dc0d668cd6bd4602b547e2f5b2e227e97
@@ -109,6 +122,14 @@ task:
     - BITCOIND_URL=https://bitcoincore.org/bin/bitcoin-core-$BITCOIND_VERSION/$BITCOIND_FILENAME
     - tar -xaf $BITCOIND_PATH || (rm -f /tmp/bitcoind/* && curl --output $BITCOIND_PATH $BITCOIND_URL && tar -xaf $BITCOIND_PATH)
     - cp -a bitcoin-$BITCOIND_VERSION/* /usr/
+  libsecp_build_cache:
+    folder: contrib/_saved_secp256k1_build
+    fingerprint_script: sha256sum ./contrib/make_libsecp256k1.sh
+    populate_script:
+      - apt-get -y install automake libtool
+      - ./contrib/make_libsecp256k1.sh
+      - mkdir contrib/_saved_secp256k1_build
+      - cp electrum/libsecp256k1.so.* contrib/_saved_secp256k1_build/
   bitcoind_service_background_script:
     - tests/regtest/run_bitcoind.sh
   electrumx_service_background_script:
@@ -117,6 +138,7 @@ task:
     - sleep 10s
     - python3 -m unittest tests/regtest.py
   env:
+    LD_LIBRARY_PATH: contrib/_saved_secp256k1_build/
     ELECTRUM_REQUIREMENTS: contrib/requirements/requirements.txt
     # ElectrumX exits with an error without this:
     ALLOW_ROOT: 1
@@ -166,15 +188,17 @@ task:
   container:
     dockerfile: contrib/build-wine/Dockerfile
     cpu: 1
-    memory: 2G
+    memory: 3G
   pip_cache:
-    folder: contrib/build-wine/.cache/win32/wine_pip_cache
+    folders:
+      - contrib/build-wine/.cache/win*/wine_pip_cache
     fingerprint_script:
       - echo $CIRRUS_TASK_NAME
       - git ls-files -s contrib/deterministic-build/*.txt
       - git ls-files -s contrib/build-wine/
   build2_cache:
-    folder: contrib/build-wine/.cache/win32/build
+    folders:
+      - contrib/build-wine/.cache/win*/build
     fingerprint_script:
       - echo $CIRRUS_TASK_NAME
       - cat contrib/make_libsecp256k1.sh | sha256sum

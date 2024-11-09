@@ -1,10 +1,10 @@
 from typing import TYPE_CHECKING, Optional, Union
 
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QGridLayout, QPushButton
+from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QGridLayout, QPushButton
 
 from electrum.i18n import _
-from electrum.util import NotEnoughFunds, NoDynamicFeeEstimates
+from electrum.util import NotEnoughFunds, NoDynamicFeeEstimates, UserCancelled
 from electrum.bitcoin import DummyAddress
 from electrum.transaction import PartialTxOutput, PartialTransaction
 
@@ -244,7 +244,7 @@ class SwapDialog(WindowModalDialog, QtEventListener):
 
     def run(self):
         """Can raise InvalidSwapParameters."""
-        if not self.exec_():
+        if not self.exec():
             return
         if self.is_reverse:
             lightning_amount = self.send_amount_e.get_amount()
@@ -319,26 +319,33 @@ class SwapDialog(WindowModalDialog, QtEventListener):
         recv_amount = self.recv_amount_e.get_amount()
         self.ok_button.setEnabled(bool(send_amount) and bool(recv_amount))
 
-    def do_normal_swap(self, lightning_amount, onchain_amount, password):
+    async def _do_normal_swap(self, lightning_amount, onchain_amount, password):
         dummy_tx = self._create_tx(onchain_amount)
         assert dummy_tx
         sm = self.swap_manager
-        coro = sm.request_normal_swap(
+        swap, invoice = await sm.request_normal_swap(
             lightning_amount_sat=lightning_amount,
             expected_onchain_amount_sat=onchain_amount,
             channels=self.channels,
         )
+        self._current_swap = swap
+        tx = sm.create_funding_tx(swap, dummy_tx, password=password)
+        txid = await sm.wait_for_htlcs_and_broadcast(swap=swap, invoice=invoice, tx=tx)
+        return txid
+
+    def do_normal_swap(self, lightning_amount, onchain_amount, password):
+        self._current_swap = None
+        coro = self._do_normal_swap(lightning_amount, onchain_amount, password)
         try:
-            swap, invoice = self.network.run_from_another_thread(coro)
+            funding_txid = self.window.run_coroutine_dialog(coro, _('Awaiting swap payment...'))
+        except UserCancelled:
+            self.swap_manager.cancel_normal_swap(self._current_swap)
+            self.window.show_message(_('Swap cancelled'))
+            return
         except Exception as e:
             self.window.show_error(str(e))
             return
-        tx = sm.create_funding_tx(swap, dummy_tx, password=password)
-        coro2 = sm.wait_for_htlcs_and_broadcast(swap=swap, invoice=invoice, tx=tx)
-        self.window.run_coroutine_dialog(
-            coro2, _('Awaiting swap payment...'),
-            on_result=lambda funding_txid: self.window.on_swap_result(funding_txid, is_reverse=False),
-            on_cancelled=lambda: sm.cancel_normal_swap(swap))
+        self.window.on_swap_result(funding_txid, is_reverse=False)
 
     def get_description(self):
         onchain_funds = "onchain funds"

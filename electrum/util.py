@@ -22,6 +22,7 @@
 # SOFTWARE.
 import binascii
 import concurrent.futures
+import logging
 import os, sys, re, json
 from collections import defaultdict, OrderedDict
 from typing import (NamedTuple, Union, TYPE_CHECKING, Tuple, Optional, Callable, Any,
@@ -238,6 +239,7 @@ class Satoshis(object):
     def __new__(cls, value):
         self = super(Satoshis, cls).__new__(cls)
         # note: 'value' sometimes has msat precision
+        assert isinstance(value, (int, Decimal)), f"unexpected type for {value=!r}"
         self.value = value
         return self
 
@@ -485,6 +487,35 @@ def profiler(func=None, *, min_threshold: Union[int, float, None] = None):
             _profiler_logger.debug(f"{name} {t:,.4f} sec")
         return o
     return do_profile
+
+
+class AsyncHangDetector:
+    """Context manager that logs every `n` seconds if encapsulated context still has not exited."""
+
+    def __init__(
+        self,
+        *,
+        period_sec: int = 15,
+        message: str,
+        logger: logging.Logger = None,
+    ):
+        self.period_sec = period_sec
+        self.message = message
+        self.logger = logger or _logger
+
+    async def _monitor(self):
+        # note: this assumes that the event loop itself is not blocked
+        t0 = time.monotonic()
+        while True:
+            await asyncio.sleep(self.period_sec)
+            t1 = time.monotonic()
+            self.logger.info(f"{self.message} (after {t1 - t0:.2f} sec)")
+
+    async def __aenter__(self):
+        self.mtask = asyncio.create_task(self._monitor())
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.mtask.cancel()
 
 
 def android_ext_dir():
@@ -956,6 +987,11 @@ testnet_block_explorers = {
                        {'tx': 'tx/', 'addr': 'address/'}),
 }
 
+testnet4_block_explorers = {
+    'mempool.space': ('https://mempool.space/testnet4/',
+                        {'tx': 'tx/', 'addr': 'address/'}),
+}
+
 signet_block_explorers = {
     'bc-2.jp': ('https://explorer.bc-2.jp/',
                         {'tx': 'tx/', 'addr': 'address/'}),
@@ -978,6 +1014,8 @@ def block_explorer_info():
     from . import constants
     if constants.net.NET_NAME == "testnet":
         return testnet_block_explorers
+    elif constants.net.NET_NAME == "testnet4":
+        return testnet4_block_explorers
     elif constants.net.NET_NAME == "signet":
         return signet_block_explorers
     return mainnet_block_explorers
@@ -1092,8 +1130,7 @@ def read_json_file(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.loads(f.read())
-    #backwards compatibility for JSONDecodeError
-    except ValueError:
+    except json.JSONDecodeError:
         _logger.exception('')
         raise FileImportFailed(_("Invalid JSON code."))
     except BaseException as e:
@@ -1807,6 +1844,11 @@ _event_listeners = defaultdict(set)  # type: Dict[str, Set[str]]
 
 
 class EventListener:
+    """Use as a mixin for a class that has methods to be triggered on events.
+    - Methods that receive the callbacks should be named "on_event_*" and decorated with @event_listener.
+    - register_callbacks() should be called exactly once per instance of EventListener, e.g. in __init__
+    - unregister_callbacks() should be called at least once, e.g. when the instance is destroyed
+    """
 
     def _list_callbacks(self):
         for c in self.__class__.__mro__:
@@ -1829,6 +1871,7 @@ class EventListener:
 
 
 def event_listener(func):
+    """To be used in subclasses of EventListener only. (how to enforce this programmatically?)"""
     classname, method_name = func.__qualname__.split('.')
     assert method_name.startswith('on_event_')
     classpath = f"{func.__module__}.{classname}"
@@ -1901,7 +1944,7 @@ class NetworkRetryManager(Generic[_NetAddrType]):
         self._last_tried_addr.clear()
 
 
-class MySocksProxy(aiorpcx.SOCKSProxy):
+class ESocksProxy(aiorpcx.SOCKSProxy):
     # note: proxy will not leak DNS as create_connection()
     # sets (local DNS) resolve=False by default
 
@@ -1915,12 +1958,17 @@ class MySocksProxy(aiorpcx.SOCKSProxy):
         return reader, writer
 
     @classmethod
-    def from_proxy_dict(cls, proxy: dict = None) -> Optional['MySocksProxy']:
-        if not proxy:
+    def from_network_settings(cls, network: Optional['Network']) -> Optional['ESocksProxy']:
+        if not network or not network.proxy:
             return None
+        proxy = network.proxy
         username, pw = proxy.get('user'), proxy.get('password')
         if not username or not pw:
-            auth = None
+            # is_proxy_tor is tri-state; None indicates it is still probing the proxy to test for TOR
+            if network.is_proxy_tor:
+                auth = aiorpcx.socks.SOCKSRandomAuth()
+            else:
+                auth = None
         else:
             auth = aiorpcx.socks.SOCKSUserAuth(username, pw)
         addr = aiorpcx.NetAddress(proxy['host'], proxy['port'])
@@ -2033,6 +2081,14 @@ class nullcontext:
         pass
 
 
+def traceback_format_exception(exc: BaseException) -> Sequence[str]:
+    """Compatibility wrapper for stdlib traceback.format_exception using python 3.10+ API."""
+    if sys.version_info[:3] >= (3, 10):
+        return traceback.format_exception(exc)
+    else:
+        return traceback.format_exception(type(exc), value=exc, tb=exc.__traceback__)
+
+
 class classproperty(property):
     """~read-only class-level @property
     from https://stackoverflow.com/a/13624858 by denis-ryzhkov
@@ -2049,14 +2105,17 @@ def get_running_loop() -> Optional[asyncio.AbstractEventLoop]:
         return None
 
 
-def error_text_str_to_safe_str(err: str) -> str:
+def error_text_str_to_safe_str(err: str, *, max_len: Optional[int] = 500) -> str:
     """Converts an untrusted error string to a sane printable ascii str.
     Never raises.
     """
-    return error_text_bytes_to_safe_str(err.encode("ascii", errors='backslashreplace'))
+    text = error_text_bytes_to_safe_str(
+        err.encode("ascii", errors='backslashreplace'),
+        max_len=None)
+    return truncate_text(text, max_len=max_len)
 
 
-def error_text_bytes_to_safe_str(err: bytes) -> str:
+def error_text_bytes_to_safe_str(err: bytes, *, max_len: Optional[int] = 500) -> str:
     """Converts an untrusted error bytes text to a sane printable ascii str.
     Never raises.
 
@@ -2069,4 +2128,12 @@ def error_text_bytes_to_safe_str(err: bytes) -> str:
     # convert to ascii, to get rid of unicode stuff
     ascii_text = err.decode("ascii", errors='backslashreplace')
     # do repr to handle ascii special chars (especially when printing/logging the str)
-    return repr(ascii_text)
+    text = repr(ascii_text)
+    return truncate_text(text, max_len=max_len)
+
+
+def truncate_text(text: str, *, max_len: Optional[int]) -> str:
+    if max_len is None or len(text) <= max_len:
+        return text
+    else:
+        return text[:max_len] + f"... (truncated. orig_len={len(text)})"

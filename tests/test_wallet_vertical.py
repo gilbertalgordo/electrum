@@ -10,14 +10,14 @@ from electrum import storage, bitcoin, keystore, bip32, slip39, wallet
 from electrum import Transaction
 from electrum import SimpleConfig
 from electrum import util
-from electrum.address_synchronizer import TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_UNCONF_PARENT
+from electrum.address_synchronizer import TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_UNCONF_PARENT, TX_HEIGHT_LOCAL
 from electrum.wallet import (sweep, Multisig_Wallet, Standard_Wallet, Imported_Wallet,
                              restore_wallet_from_text, Abstract_Wallet, CannotBumpFee, BumpFeeStrategy,
                              TransactionPotentiallyDangerousException, TransactionDangerousException,
                              TxSighashRiskLevel)
-from electrum.util import bfh, NotEnoughFunds, UnrelatedTransactionException, UserFacingException
+from electrum.util import bfh, NotEnoughFunds, UnrelatedTransactionException, UserFacingException, TxMinedInfo
 from electrum.transaction import Transaction, PartialTxOutput, tx_from_any, Sighash
-from electrum.mnemonic import seed_type
+from electrum.mnemonic import calc_seed_type
 from electrum.network import Network
 
 from electrum.plugins.trustedcoin import trustedcoin
@@ -33,6 +33,7 @@ assert UNICODE_HORROR == '₿ 😀 😈     う けたま わる w͢͢͝h͡o͢͡
 class WalletIntegrityHelper:
 
     gap_limit = 1  # make tests run faster
+    # TODO also use short gap limit for change addrs, for performance
 
     @classmethod
     def check_seeded_keystore_sanity(cls, test_obj, ks):
@@ -90,7 +91,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_seed_standard(self, mock_save_db):
         seed_words = 'cycle rocket west magnet parrot shuffle foot correct salt library feed song'
-        self.assertEqual(seed_type(seed_words), 'standard')
+        self.assertEqual(calc_seed_type(seed_words), 'standard')
 
         ks = keystore.from_seed(seed_words, passphrase='', for_multisig=False)
 
@@ -109,7 +110,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_seed_segwit(self, mock_save_db):
         seed_words = 'bitter grass shiver impose acquire brush forget axis eager alone wine silver'
-        self.assertEqual(seed_type(seed_words), 'segwit')
+        self.assertEqual(calc_seed_type(seed_words), 'segwit')
 
         ks = keystore.from_seed(seed_words, passphrase='', for_multisig=False)
 
@@ -131,7 +132,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_seed_segwit_passphrase(self, mock_save_db):
         seed_words = 'bitter grass shiver impose acquire brush forget axis eager alone wine silver'
-        self.assertEqual(seed_type(seed_words), 'segwit')
+        self.assertEqual(calc_seed_type(seed_words), 'segwit')
 
         ks = keystore.from_seed(seed_words, passphrase=UNICODE_HORROR, for_multisig=False)
 
@@ -153,7 +154,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_seed_old(self, mock_save_db):
         seed_words = 'powerful random nobody notice nothing important anyway look away hidden message over'
-        self.assertEqual(seed_type(seed_words), 'old')
+        self.assertEqual(calc_seed_type(seed_words), 'old')
 
         ks = keystore.from_seed(seed_words, passphrase='', for_multisig=False)
 
@@ -169,10 +170,11 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
         self.assertEqual(w.get_change_addresses()[0], '1KRW8pH6HFHZh889VDq6fEKvmrsmApwNfe')
 
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
-    async def test_electrum_seed_2fa_legacy_pre27(self, mock_save_db):
-        # pre-version-2.7 2fa seed
+    async def test_electrum_seed_2fa_legacy_pre27_25words(self, mock_save_db):
+        # pre-version-2.7 2fa seed, containing 25 words
         seed_words = 'bind clever room kidney crucial sausage spy edit canvas soul liquid ribbon slam open alpha suffer gate relax voice carpet law hill woman tonight abstract'
-        self.assertEqual(seed_type(seed_words), '2fa')
+        assert len(seed_words.split()) == 25
+        self.assertEqual(calc_seed_type(seed_words), '2fa')
 
         xprv1, xpub1, xprv2, xpub2 = trustedcoin.TrustedCoinPlugin.xkeys_from_seed(seed_words, '')
 
@@ -204,10 +206,46 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
         self.assertEqual(w.get_change_addresses()[0], '3Ke6pKrmtSyyQaMob1ES4pk8siAAkRmst9')
 
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_electrum_seed_2fa_legacy_pre27_24words(self, mock_save_db):
+        # pre-version-2.7 2fa seed, containing 24 words
+        seed_words = 'sibling leg cable timber patient foot occur plate travel finger chef scale radio citizen promote immune must chef fluid sea sphere common acid lab'
+        assert len(seed_words.split()) == 24
+        self.assertEqual(calc_seed_type(seed_words), '2fa')
+
+        xprv1, xpub1, xprv2, xpub2 = trustedcoin.TrustedCoinPlugin.xkeys_from_seed(seed_words, '')
+
+        ks1 = keystore.from_xprv(xprv1)
+        self.assertTrue(isinstance(ks1, keystore.BIP32_KeyStore))
+        self.assertEqual(ks1.xprv, 'xprv9s21ZrQH143K37iqjPnsBm27cRgrg6TiKNwhCYg7Uk46yLKB5s4N1Knzo7rTkYvjojh9Z6KkGTMi6CV5h4kEcWYLmHjcTW8kK5bnMVXvEvp')
+        self.assertEqual(ks1.xpub, 'xpub661MyMwAqRbcFboJqRKsYtxrATXM5ZBZgbsHzw5j35b5r8eKdQNcZ87UeR24LDSn2RxspwL9s7yM3KqtPFq5dwP5csmQ2Xb1dgaQztrNGyP')
+        self.assertEqual(ks1.xpub, xpub1)
+
+        ks2 = keystore.from_xprv(xprv2)
+        self.assertTrue(isinstance(ks2, keystore.BIP32_KeyStore))
+        self.assertEqual(ks2.xprv, 'xprv9s21ZrQH143K2qJ6sVTs5bXnrw7CPEpYTkefvW6Xj9fMuskny5t3TaLMAvZtSkYwT68asJdrEaay8q4ntmXvYCuQL3ULdEziFCB9KyZhuDX')
+        self.assertEqual(ks2.xpub, 'xpub661MyMwAqRbcFKNZyWzsSjUXQxwgnhYPpyaGitW9HVCLng5wWdCJ1Neq2DLV3717ED1RG3aTGLJVVBt5CJEXmCzMLBjqXtK4MEvRXiYSvnJ')
+        self.assertEqual(ks2.xpub, xpub2)
+
+        long_user_id, short_id = trustedcoin.get_user_id(
+            {'x1': {'xpub': xpub1},
+             'x2': {'xpub': xpub2}})
+        xtype = bip32.xpub_type(xpub1)
+        xpub3 = trustedcoin.make_xpub(trustedcoin.get_signing_xpub(xtype), long_user_id)
+        ks3 = keystore.from_xpub(xpub3)
+        WalletIntegrityHelper.check_xpub_keystore_sanity(self, ks3)
+        self.assertTrue(isinstance(ks3, keystore.BIP32_KeyStore))
+
+        w = WalletIntegrityHelper.create_multisig_wallet([ks1, ks2, ks3], '2of3', config=self.config)
+        self.assertEqual(w.txin_type, 'p2sh')
+
+        self.assertEqual(w.get_receiving_addresses()[0], '39XK9VBGiK4bqNJYrajfKE8C1ky4gYA5Zy')
+        self.assertEqual(w.get_change_addresses()[0], '3PKtHrjiKdsZ73ULZ4Sf1vDBnrUoAEtLDe')
+
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_seed_2fa_legacy_post27(self, mock_save_db):
         # post-version-2.7 2fa seed
         seed_words = 'kiss live scene rude gate step hip quarter bunker oxygen motor glove'
-        self.assertEqual(seed_type(seed_words), '2fa')
+        self.assertEqual(calc_seed_type(seed_words), '2fa')
 
         xprv1, xpub1, xprv2, xpub2 = trustedcoin.TrustedCoinPlugin.xkeys_from_seed(seed_words, '')
 
@@ -241,7 +279,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_seed_2fa_segwit(self, mock_save_db):
         seed_words = 'universe topic remind silver february ranch shine worth innocent cattle enhance wise'
-        self.assertEqual(seed_type(seed_words), '2fa_segwit')
+        self.assertEqual(calc_seed_type(seed_words), '2fa_segwit')
 
         xprv1, xpub1, xprv2, xpub2 = trustedcoin.TrustedCoinPlugin.xkeys_from_seed(seed_words, '')
 
@@ -352,7 +390,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_multisig_seed_standard(self, mock_save_db):
         seed_words = 'blast uniform dragon fiscal ensure vast young utility dinosaur abandon rookie sure'
-        self.assertEqual(seed_type(seed_words), 'standard')
+        self.assertEqual(calc_seed_type(seed_words), 'standard')
 
         ks1 = keystore.from_seed(seed_words, passphrase='', for_multisig=True)
         WalletIntegrityHelper.check_seeded_keystore_sanity(self, ks1)
@@ -374,7 +412,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
     async def test_electrum_multisig_seed_segwit(self, mock_save_db):
         seed_words = 'snow nest raise royal more walk demise rotate smooth spirit canyon gun'
-        self.assertEqual(seed_type(seed_words), 'segwit')
+        self.assertEqual(calc_seed_type(seed_words), 'segwit')
 
         ks1 = keystore.from_seed(seed_words, passphrase='', for_multisig=True)
         WalletIntegrityHelper.check_seeded_keystore_sanity(self, ks1)
@@ -497,7 +535,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
         self.assertEqual(w.get_change_addresses()[0], 'bc1q0fj5mra96hhnum80kllklc52zqn6kppt3hyzr49yhr3ecr42z3tsrkg3gs')
 
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
-    async def test_slip39_basic_3of6_bip44_standard(self, mock_save_db):
+    async def test_slip39_non_extendable_basic_3of6_bip44_standard(self, mock_save_db):
         """
         BIP32 Root Key for passphrase "TREZOR":
         xprv9s21ZrQH143K2pMWi8jrTawHaj16uKk4CSbvo4Zt61tcrmuUDMx2o1Byzcr3saXNGNvHP8zZgXVdJHsXVdzYFPavxvCyaGyGr1WkAYG83ce
@@ -524,7 +562,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
         self.assertEqual(w.get_change_addresses()[0], '1Aw4wpXsAyEHSgMZqPdyewoAtJqH9Jaso3')
 
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
-    async def test_slip39_basic_2of5_bip49_p2sh_segwit(self, mock_save_db):
+    async def test_slip39_non_extendable_basic_2of5_bip49_p2sh_segwit(self, mock_save_db):
         """
         BIP32 Root Key for passphrase "TREZOR":
         xprv9s21ZrQH143K2o6EXEHpVy8TCYoMmkBnDCCESLdR2ieKwmcNG48ck2XJQY4waS7RUQcXqR9N7HnQbUVEDMWYyREdF1idQqxFHuCfK7fqFni
@@ -550,7 +588,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
         self.assertEqual(w.get_change_addresses()[0], '3FVvdRhR7racZhmcvrGAqX9eJoP8Sw3ypp')
 
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
-    async def test_slip39_groups_128bit_bip84_native_segwit(self, mock_save_db):
+    async def test_slip39_non_extendable_groups_128bit_bip84_native_segwit(self, mock_save_db):
         """
         BIP32 Root Key for passphrase "TREZOR":
         xprv9s21ZrQH143K3dzDLfeY3cMp23u5vDeFYftu5RPYZPucKc99mNEddU4w99GxdgUGcSfMpVDxhnR1XpJzZNXRN1m6xNgnzFS5MwMP6QyBRKV
@@ -580,7 +618,7 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
         self.assertEqual(w.get_change_addresses()[0], 'bc1q8l6hcvlczu4mtjcnlwhczw7vdxnvwccpjl3cwz')
 
     @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
-    async def test_slip39_groups_256bit_bip49_p2sh_segwit(self, mock_save_db):
+    async def test_slip39_non_extendable_groups_256bit_bip49_p2sh_segwit(self, mock_save_db):
         """
         BIP32 Root Key for passphrase "TREZOR":
         xprv9s21ZrQH143K2UspC9FRPfQC9NcDB4HPkx1XG9UEtuceYtpcCZ6ypNZWdgfxQ9dAFVeD1F4Zg4roY7nZm2LB7THPD6kaCege3M7EuS8v85c
@@ -607,6 +645,117 @@ class TestWalletKeystoreAddressIntegrityForMainnet(ElectrumTestCase):
         self.assertEqual(w.get_receiving_addresses()[0], '3FoqkcrEHgkKQ3iXStantygCetRGSRMMNE')
         self.assertEqual(w.get_change_addresses()[0], '32tvTmBLfLofu8ps4SWpUJC4fS699jiWvC')
 
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_slip39_extendable_basic_3of6_bip44_standard(self, mock_save_db):
+        """
+        BIP32 Root Key for passphrase "TREZOR":
+        xprv9yba7duYBT5g7SbaN1oCX43xeDtjKXNUZ2uSmJ3efHsWYaLkqzdjg2bjLYYzQ9rmXdNzDHYWXv5m9aBCqbFbZzAoGcAceH1K8cPYVDpsJLH
+        """
+        mnemonics = [
+            "judicial dramatic academic agree craft physics memory born prize academic black listen elder station premium dance sympathy flip always kitchen",
+            "judicial dramatic academic arcade clogs timber taught recover burning judicial desktop square ecology budget nervous overall tidy knife fused knit",
+            "judicial dramatic academic axle destroy justice username elegant filter seafood device ranked behavior pecan infant lunar answer identify hour enjoy",
+        ]
+
+        encrypted_seed = slip39.recover_ems(mnemonics)
+        root_seed = encrypted_seed.decrypt('TREZOR')
+        self.assertEqual("255415e2b20ad13cef7adca1e336eaec", root_seed.hex())
+        ks = keystore.from_bip43_rootseed(root_seed, derivation="m/44'/0'/0'")
+
+        self.assertTrue(isinstance(ks, keystore.BIP32_KeyStore))
+
+        self.assertEqual(ks.xprv, 'xprv9yba7duYBT5g7SbaN1oCX43xeDtjKXNUZ2uSmJ3efHsWYaLkqzdjg2bjLYYzQ9rmXdNzDHYWXv5m9aBCqbFbZzAoGcAceH1K8cPYVDpsJLH')
+        self.assertEqual(ks.xpub, 'xpub6CavX9SS1pdyKvg3U3LCtBzhCFjDiz6KvFq3ZgTGDdQVRNfuPXwzDpvDBqbg1kEsDgEeHo6uWeYsZWALRejoJMVCq4rprrHkbw8Jyu3uaMb')
+
+        w = WalletIntegrityHelper.create_standard_wallet(ks, config=self.config)
+        self.assertEqual(w.txin_type, 'p2pkh')
+
+        self.assertEqual(w.get_receiving_addresses()[0], '1N4hqJRTVqUbwT5WCbbsQSwKRPPPzG1TSo')
+        self.assertEqual(w.get_change_addresses()[0], '1FW3QQzbYRSUoNDDYGWPvSCoom8fBhPC9k')
+
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_slip39_extendable_basic_2of5_bip49_p2sh_segwit(self, mock_save_db):
+        """
+        BIP32 Root Key for passphrase "TREZOR":
+        yprvAJP391MZiYGpkDnSkAfHBGrEKNxpkFVbx9hap59M2hxD1i7kmnaBUC2yo8tzz5AwxSv3ekJRrSGYWA8ec7XmQGLvX4xkWwCRqiadT5fuTfh
+        """
+        mnemonics = [
+            "station type academic acid away gather venture pupal speak treat ruler pecan soldier cowboy paces wavy review similar born moment",
+            "station type academic aquatic bundle mineral twice temple miracle ruin earth olympic system dining inform alive branch false easy manual",
+        ]
+
+        encrypted_seed = slip39.recover_ems(mnemonics)
+        root_seed = encrypted_seed.decrypt('TREZOR')
+        ks = keystore.from_bip43_rootseed(root_seed, derivation="m/49'/0'/0'")
+
+        self.assertTrue(isinstance(ks, keystore.BIP32_KeyStore))
+
+        self.assertEqual(ks.xprv, 'yprvAJP391MZiYGpkDnSkAfHBGrEKNxpkFVbx9hap59M2hxD1i7kmnaBUC2yo8tzz5AwxSv3ekJRrSGYWA8ec7XmQGLvX4xkWwCRqiadT5fuTfh')
+        self.assertEqual(ks.xpub, 'ypub6XNPYWtTYuq7xhrurCCHYQnxsQoK9iDTKNdBcTYxb3VBtWSuKKtS1zMTeQTDeVe1Y8mzGue1oDYyvjczspnPznLmyruzxVTU785W2QpbTW9')
+
+        w = WalletIntegrityHelper.create_standard_wallet(ks, config=self.config)
+        self.assertEqual(w.txin_type, 'p2wpkh-p2sh')
+
+        self.assertEqual(w.get_receiving_addresses()[0], '38diDMcH7japAtpJjVKviBroQfTdvgpdqX')
+        self.assertEqual(w.get_change_addresses()[0], '36Hd2PnEvJpN9pUdhpZWh3aQccbRp46FVc')
+
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_slip39_extendable_groups_128bit_bip84_native_segwit(self, mock_save_db):
+        """
+        BIP32 Root Key for passphrase "TREZOR":
+        zprvAe6okUFoH5tieuTJJxN84xjPCvWkhFiiP87myHqTNmfux4wY8XnLG7DxezL5Dt2jXu5FrsMc4wEPhAJovAGhH1cAPjmkhh3KcSCMRyuQghd
+        """
+
+        # SLIP39 shares (128 bits, 2 groups from 1 of 1, 1 of 1, 3 of 5, 2 of 6)
+        mnemonics = [
+            "fact else acrobat romp analysis usher havoc vitamins analysis garden prevent romantic silent dramatic adjust priority mailman plains vintage else",
+            "fact else ceramic round craft lips snake faint adorn square bucket deadline violence guitar greatest academic stadium snake frequent memory",
+            "fact else ceramic scatter counter remove club forbid busy cause taxi forecast prayer uncover living type training forward software pumps",
+            "fact else ceramic shaft clock crowd detect cleanup wildlife depict include trip profile isolate express category wealthy advance garden mixture",
+        ]
+
+        encrypted_seed = slip39.recover_ems(mnemonics)
+        root_seed = encrypted_seed.decrypt('TREZOR')
+        ks = keystore.from_bip43_rootseed(root_seed, derivation="m/84'/0'/0'")
+
+        self.assertTrue(isinstance(ks, keystore.BIP32_KeyStore))
+
+        self.assertEqual(ks.xprv, 'zprvAe6okUFoH5tieuTJJxN84xjPCvWkhFiiP87myHqTNmfux4wY8XnLG7DxezL5Dt2jXu5FrsMc4wEPhAJovAGhH1cAPjmkhh3KcSCMRyuQghd')
+        self.assertEqual(ks.xpub, 'zpub6s6A9ynh7TT1sPXmQyu8S6g7kxMF6iSZkM3NmgF4w7CtpsGgg56aouYSWHgAoMy186a8FRT8zkmhcwV5SWKFFQfMpvV8C9Ft4woWSzD5sXz')
+
+        w = WalletIntegrityHelper.create_standard_wallet(ks, config=self.config)
+        self.assertEqual(w.txin_type, 'p2wpkh')
+
+        self.assertEqual(w.get_receiving_addresses()[0], 'bc1qs2svwhfz47qv9qju2waa6prxzv5f522fc4p06t')
+        self.assertEqual(w.get_change_addresses()[0], 'bc1qmjq5nenac3vjwltldk5qsq4yd8mttw2dpkmx06')
+
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_slip39_extendable_groups_256bit_bip49_p2sh_segwit(self, mock_save_db):
+        """
+        BIP32 Root Key for passphrase "TREZOR":
+        yprvAJbhup8ey3hmPhgVsXKySTS54BfywUZR6SvQ2jrjdsUgNd4P8B5HR7ute93zXVTXKUvrmvnav1spLzEkDuT7Cy3bf3hWtYoH6A5p8vNzbEC
+        """
+
+        # SLIP39 shares (256 bits, 2 groups from 1 of 1, 1 of 1, 3 of 5, 2 of 6):
+        mnemonics = [
+            "smart surprise acrobat romp deal omit pupal capacity invasion should glen smear segment frost surprise ancestor plan frost cultural herd",
+            "smart surprise beard romp closet antenna pencil rapids goat artwork race industry segment parcel briefing glad voice camera priority satoshi",
+        ]
+
+        encrypted_seed = slip39.recover_ems(mnemonics)
+        root_seed = encrypted_seed.decrypt('TREZOR')
+        ks = keystore.from_bip43_rootseed(root_seed, derivation="m/49'/0'/0'")
+
+        self.assertTrue(isinstance(ks, keystore.BIP32_KeyStore))
+
+        self.assertEqual(ks.xprv, 'yprvAJbhup8ey3hmPhgVsXKySTS54BfywUZR6SvQ2jrjdsUgNd4P8B5HR7ute93zXVTXKUvrmvnav1spLzEkDuT7Cy3bf3hWtYoH6A5p8vNzbEC')
+        self.assertEqual(ks.xpub, 'ypub6Xb4KKfYoRG4cBkxyYryobNocDWULwHGTfqzq8GMCD1fFRPXfiPXxvENVQYVbi64BJzdPnPUiJ4iY37X5BA594dqxyE4FwccHdhydU9RhPJ')
+
+        w = WalletIntegrityHelper.create_standard_wallet(ks, config=self.config)
+        self.assertEqual(w.txin_type, 'p2wpkh-p2sh')
+
+        self.assertEqual(w.get_receiving_addresses()[0], '3JDN4wF5BphZqcJFFYuDA7N1apzfPYyJLG')
+        self.assertEqual(w.get_change_addresses()[0], '3J8zNvhJndqzBcuPuarzUn1kWs9N4ZY7HS')
 
 class TestWalletKeystoreAddressIntegrityForTestnet(ElectrumTestCase):
     TESTNET = True
@@ -4032,6 +4181,70 @@ class TestWalletHistory_DoubleSpend(ElectrumTestCase):
         txC = Transaction(self.transactions["2c9aa33d9c8ec649f9bfb84af027a5414b760be5231fe9eca4a95b9eb3f8a017"])
         w.adb.add_transaction(txC)
         self.assertEqual(999890, sum(w.get_balance()))
+
+
+class TestWalletHistory_HelperFns(ElectrumTestCase):
+    TESTNET = True
+
+    def setUp(self):
+        super().setUp()
+        self.config = SimpleConfig({'electrum_path': self.electrum_path})
+
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_get_tx_status_feerate_for_local_2of3_multisig_partial_tx(self, mock_save_db):
+        wallet1 = WalletIntegrityHelper.create_multisig_wallet(
+            [
+                keystore.from_seed('bitter grass shiver impose acquire brush forget axis eager alone wine silver', passphrase='', for_multisig=True),
+                keystore.from_xpub('Vpub5fcdcgEwTJmbmqAktuK8Kyq92fMf7sWkcP6oqAii2tG47dNbfkGEGUbfS9NuZaRywLkHE6EmUksrqo32ZL3ouLN1HTar6oRiHpDzKMAF1tf'),
+                keystore.from_xpub('Vpub5fjkKyYnvSS4wBuakWTkNvZDaBM2vQ1MeXWq368VJHNr2eT8efqhpmZ6UUkb7s2dwCXv2Vuggjdhk4vZVyiAQTwUftvff73XcUGq2NQmWra')
+            ],
+            '2of3', gap_limit=2,
+            config=self.config,
+        )
+
+        # bootstrap wallet1
+        funding_tx = Transaction('01000000000101a41aae475d026c9255200082c7fad26dc47771275b0afba238dccda98a597bd20000000000fdffffff02400d0300000000002200203c43ac80d6e3015cf378bf6bac0c22456723d6050bef324ec641e7762440c63c9dcd410000000000160014824626055515f3ed1d2cfc9152d2e70685c71e8f02483045022100b9f39fad57d07ce1e18251424034f21f10f20e59931041b5167ae343ce973cf602200fefb727fa0ffd25b353f1bcdae2395898fe407b692c62f5885afbf52fa06f5701210301a28f68511ace43114b674371257bb599fd2c686c4b19544870b1799c954b40e9c11300')
+        wallet1.adb.receive_tx_callback(funding_tx, TX_HEIGHT_UNCONFIRMED)
+
+        # wallet1 -> wallet2
+        outputs = [PartialTxOutput.from_address_and_value("2MuUcGmQ2mLN3vjTuqDSgZpk4LPKDsuPmhN", 165000)]
+        tx = wallet1.create_transaction(outputs=outputs, password=None, fee=5000, tx_version=1, rbf=False, sign=False)
+        self.assertEqual(
+            "wsh(sortedmulti(2,[b2e35a7d/1h]tpubD9aPYLPPYw8MxU3cD57LwpV5v7GomHxdv62MSbPcRkp47zwXx69ACUFsKrj8xzuzRrij9FWVhfvkvNqtqsr8ZtefkDsGZ9GLuHzoS6bXyk1/0/0,[53b77ddb/1h]tpubD8spLJysN7v7V1KHvkZ7AwjnXShKafopi7Vu3Ahs2S46FxBPTode8DgGxDo55k4pJvETGScZFwnM5f2Y31EUjteJdhxR73sjr9ieydgah2U/0/0,[43067d63/1h]tpubD8khd1g1tzFeKeaU59QV811hyvhwn9KDfy5sqFJ5m2wJLw6rUt4AZviqutRPXTUAK4SpU2we3y2WBP916Ma8Em4qFGcbYkFvXVfpGYV3oZR/0/0))",
+            tx.inputs()[0].script_descriptor.to_string_no_checksum())
+        partial_tx = tx.serialize_as_bytes().hex()
+        self.assertEqual("70736274ff01007e0100000001213e1012a461e056752fab5a6414a2fb63f950cd21a50ac5e2b82d339d6cbdd20000000000feffffff023075000000000000220020cc5e4cc05a76d0648cd0742768556317e9f8cc729aed077134287909035dba88888402000000000017a914187842cea9c15989a51ce7ca889a08b824bf874387000000000001012b400d0300000000002200203c43ac80d6e3015cf378bf6bac0c22456723d6050bef324ec641e7762440c63c0100eb01000000000101a41aae475d026c9255200082c7fad26dc47771275b0afba238dccda98a597bd20000000000fdffffff02400d0300000000002200203c43ac80d6e3015cf378bf6bac0c22456723d6050bef324ec641e7762440c63c9dcd410000000000160014824626055515f3ed1d2cfc9152d2e70685c71e8f02483045022100b9f39fad57d07ce1e18251424034f21f10f20e59931041b5167ae343ce973cf602200fefb727fa0ffd25b353f1bcdae2395898fe407b692c62f5885afbf52fa06f5701210301a28f68511ace43114b674371257bb599fd2c686c4b19544870b1799c954b40e9c1130001056952210223f815ab09f6bfc8519165c5232947ae89d9d43d678fb3486f3b28382a2371fa210273c529c2c9a99592f2066cebc2172a48991af2b471cb726b9df78c6497ce984e2102aa8fc578b445a1e4257be6b978fcece92980def98dce0e1eb89e7364635ae94153ae22060223f815ab09f6bfc8519165c5232947ae89d9d43d678fb3486f3b28382a2371fa10b2e35a7d01000080000000000000000022060273c529c2c9a99592f2066cebc2172a48991af2b471cb726b9df78c6497ce984e1053b77ddb010000800000000000000000220602aa8fc578b445a1e4257be6b978fcece92980def98dce0e1eb89e7364635ae9411043067d6301000080000000000000000000010169522102174696a58a8dcd6c6455bd25e0749e9a6fc7d84ee09e192ab37b0d0b18c2de1a2102c807a19ca6783261f8c198ffcc437622e7ecba8d6c5692f3a5e7f1e45af53fd52102eee40c7e24d89639182db32f5e9188613e4bc212da2ee9b4ccc85d9b82e1a98053ae220202174696a58a8dcd6c6455bd25e0749e9a6fc7d84ee09e192ab37b0d0b18c2de1a1053b77ddb010000800100000000000000220202c807a19ca6783261f8c198ffcc437622e7ecba8d6c5692f3a5e7f1e45af53fd51043067d63010000800100000000000000220202eee40c7e24d89639182db32f5e9188613e4bc212da2ee9b4ccc85d9b82e1a98010b2e35a7d0100008001000000000000000000",
+                         partial_tx)
+        tx = tx_from_any(partial_tx)  # simulates moving partial txn between cosigners
+        self.assertFalse(tx.is_complete())
+
+        wallet1.adb.add_transaction(tx)
+        # let's see if the calculated feerate correct:
+        self.assertEqual((3, 'Local [26.3 sat/vB]'),
+                         wallet1.get_tx_status(tx.txid(), TxMinedInfo(height=TX_HEIGHT_LOCAL, conf=0)))
+
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_get_tx_status_feerate_for_local_2of3_multisig_signed_tx(self, mock_save_db):
+        wallet1 = WalletIntegrityHelper.create_multisig_wallet(
+            [
+                keystore.from_seed('bitter grass shiver impose acquire brush forget axis eager alone wine silver', passphrase='', for_multisig=True),
+                keystore.from_xpub('Vpub5fcdcgEwTJmbmqAktuK8Kyq92fMf7sWkcP6oqAii2tG47dNbfkGEGUbfS9NuZaRywLkHE6EmUksrqo32ZL3ouLN1HTar6oRiHpDzKMAF1tf'),
+                keystore.from_xpub('Vpub5fjkKyYnvSS4wBuakWTkNvZDaBM2vQ1MeXWq368VJHNr2eT8efqhpmZ6UUkb7s2dwCXv2Vuggjdhk4vZVyiAQTwUftvff73XcUGq2NQmWra')
+            ],
+            '2of3', gap_limit=2,
+            config=self.config,
+        )
+
+        # bootstrap wallet1
+        funding_tx = Transaction('01000000000101a41aae475d026c9255200082c7fad26dc47771275b0afba238dccda98a597bd20000000000fdffffff02400d0300000000002200203c43ac80d6e3015cf378bf6bac0c22456723d6050bef324ec641e7762440c63c9dcd410000000000160014824626055515f3ed1d2cfc9152d2e70685c71e8f02483045022100b9f39fad57d07ce1e18251424034f21f10f20e59931041b5167ae343ce973cf602200fefb727fa0ffd25b353f1bcdae2395898fe407b692c62f5885afbf52fa06f5701210301a28f68511ace43114b674371257bb599fd2c686c4b19544870b1799c954b40e9c11300')
+        wallet1.adb.receive_tx_callback(funding_tx, TX_HEIGHT_UNCONFIRMED)
+
+        # wallet1 -> wallet2
+        tx = tx_from_any("01000000000101213e1012a461e056752fab5a6414a2fb63f950cd21a50ac5e2b82d339d6cbdd20000000000feffffff023075000000000000220020cc5e4cc05a76d0648cd0742768556317e9f8cc729aed077134287909035dba88888402000000000017a914187842cea9c15989a51ce7ca889a08b824bf8743870400473044022055cb04fa71c4b5955724d7ac5da90436d75212e7847fc121cb588f54bcdffdc4022064eca1ad639b7c748101059dc69f2893abb3b396bcf9c13f670415076f93ddbf01473044022009230e456724f2a4c10d886c836eeec599b21db0bf078aa8fc8c95868b8920ec02200dfda835a66acb5af50f0d95fcc4b76c6e8f4789a7184c182275b087d1efe556016952210223f815ab09f6bfc8519165c5232947ae89d9d43d678fb3486f3b28382a2371fa210273c529c2c9a99592f2066cebc2172a48991af2b471cb726b9df78c6497ce984e2102aa8fc578b445a1e4257be6b978fcece92980def98dce0e1eb89e7364635ae94153ae00000000")
+        wallet1.adb.add_transaction(tx)
+        # let's see if the calculated feerate correct:
+        self.assertEqual((3, 'Local [26.3 sat/vB]'),
+                         wallet1.get_tx_status(tx.txid(), TxMinedInfo(height=TX_HEIGHT_LOCAL, conf=0)))
 
 
 class TestImportedWallet(ElectrumTestCase):

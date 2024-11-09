@@ -40,10 +40,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional, TYPE_CHECKING, Dict, List
 import os
 
-from .import util, ecc
+import electrum_ecc as ecc
+
+from . import util
+from . import keystore
 from .util import (bfh, format_satoshis, json_decode, json_normalize,
                    is_hash256_str, is_hex_str, to_bytes, parse_max_spend, to_decimal,
-                   UserFacingException)
+                   UserFacingException, InvalidPassword)
 from . import bitcoin
 from .bitcoin import is_address,  hash_160, COIN
 from .bip32 import BIP32Node
@@ -53,12 +56,12 @@ from .transaction import (Transaction, multisig_script, TxOutput, PartialTransac
 from . import transaction
 from .invoices import PR_PAID, PR_UNPAID, PR_UNKNOWN, PR_EXPIRED
 from .synchronizer import Notifier
-from .wallet import Abstract_Wallet, create_new_wallet, restore_wallet_from_text, Deterministic_Wallet, BumpFeeStrategy
+from .wallet import Abstract_Wallet, create_new_wallet, restore_wallet_from_text, Deterministic_Wallet, BumpFeeStrategy, Imported_Wallet
 from .address_synchronizer import TX_HEIGHT_LOCAL
 from .mnemonic import Mnemonic
 from .lnutil import SENT, RECEIVED
 from .lnutil import LnFeatures
-from .lnutil import extract_nodeid
+from .lntransport import extract_nodeid
 from .lnpeer import channel_id_from_funding_tx
 from .plugin import run_hook, DeviceMgr, Plugins
 from .version import ELECTRUM_VERSION
@@ -156,8 +159,13 @@ def command(s):
             wallet = kwargs.get('wallet')  # type: Optional[Abstract_Wallet]
             if cmd.requires_wallet and not wallet:
                 raise UserFacingException('wallet not loaded')
-            if cmd.requires_password and password is None and wallet.has_password():
-                raise UserFacingException('Password required')
+            if cmd.requires_password and wallet.has_password():
+                if password is None:
+                    raise UserFacingException('Password required')
+                try:
+                    wallet.check_password(password)
+                except InvalidPassword as e:
+                    raise UserFacingException(str(e)) from None
             if cmd.requires_lightning and (not wallet or not wallet.has_lightning()):
                 raise UserFacingException('Lightning not enabled in this wallet')
             return await func(*args, **kwargs)
@@ -246,15 +254,13 @@ class Commands:
         ]
 
     @command('n')
-    async def load_wallet(self, wallet_path=None, unlock=False, password=None):
+    async def load_wallet(self, wallet_path=None, password=None):
         """
         Load the wallet in memory
         """
         wallet = self.daemon.load_wallet(wallet_path, password, upgrade=True)
         if wallet is None:
             raise UserFacingException('could not load wallet')
-        if unlock:
-            wallet.unlock(password)
         run_hook('load_wallet', wallet, None)
 
     @command('n')
@@ -367,6 +373,11 @@ class Commands:
         sh = bitcoin.address_to_scripthash(address)
         return await self.network.get_history_for_scripthash(sh)
 
+    @command('wp')
+    async def unlock(self, wallet: Abstract_Wallet = None, password=None):
+        """Unlock the wallet (store the password in memory)."""
+        wallet.unlock(password)
+
     @command('w')
     async def listunspent(self, wallet: Abstract_Wallet = None):
         """List unspent outputs. Returns the list of unspent transaction
@@ -422,9 +433,9 @@ class Commands:
             sec = txin_dict.get('privkey')
             if sec:
                 txin_type, privkey, compressed = bitcoin.deserialize_privkey(sec)
-                pubkey = ecc.ECPrivkey(privkey).get_public_key_hex(compressed=compressed)
-                keypairs[pubkey] = privkey, compressed
-                desc = descriptor.get_singlesig_descriptor_from_legacy_leaf(pubkey=pubkey, script_type=txin_type)
+                pubkey = ecc.ECPrivkey(privkey).get_public_key_bytes(compressed=compressed)
+                keypairs[pubkey] = privkey
+                desc = descriptor.get_singlesig_descriptor_from_legacy_leaf(pubkey=pubkey.hex(), script_type=txin_type)
                 txin.script_descriptor = desc
             inputs.append(txin)
 
@@ -465,7 +476,7 @@ class Commands:
             if address in txins_dict.keys():
                 for txin in txins_dict[address]:
                     txin.script_descriptor = desc
-                tx.sign({pubkey.hex(): (priv2, compressed)})
+                tx.sign({pubkey: priv2})
 
         return tx.serialize()
 
@@ -494,8 +505,8 @@ class Commands:
         """Create multisig address"""
         assert isinstance(pubkeys, list), (type(num), type(pubkeys))
         redeem_script = multisig_script(pubkeys, num)
-        address = bitcoin.hash160_to_p2sh(hash_160(bfh(redeem_script)))
-        return {'address':address, 'redeemScript':redeem_script}
+        address = bitcoin.hash160_to_p2sh(hash_160(redeem_script))
+        return {'address': address, 'redeemScript': redeem_script.hex()}
 
     @command('w')
     async def freeze(self, address: str, wallet: Abstract_Wallet = None):
@@ -618,7 +629,7 @@ class Commands:
         # Add shared libs (.so/.dll), and non-pure-python dependencies.
         # Such deps can be installed in various ways - often via the Linux distro's pkg manager,
         # instead of using pip, hence it is useful to list them for debugging.
-        from . import ecc_fast
+        from electrum_ecc import ecc_fast
         ret.update(ecc_fast.version_info())
         from . import qrscanner
         ret.update(qrscanner.version_info())
@@ -663,15 +674,26 @@ class Commands:
 
     @command('wp')
     async def importprivkey(self, privkey, password=None, wallet: Abstract_Wallet = None):
-        """Import a private key."""
+        """Import a private key or a list of private keys."""
         if not wallet.can_import_privkey():
             return "Error: This type of wallet cannot import private keys. Try to create a new wallet with that key."
-        try:
-            addr = wallet.import_private_key(privkey, password)
-            out = "Keypair imported: " + addr
-        except Exception as e:
-            out = "Error: " + repr(e)
-        return out
+        assert isinstance(wallet, Imported_Wallet)
+        keys = privkey.split()
+        if not keys:
+            return "Error: no keys given"
+        elif len(keys) == 1:
+            try:
+                addr = wallet.import_private_key(keys[0], password)
+                out = "Keypair imported: " + addr
+            except Exception as e:
+                out = "Error: " + repr(e)
+            return out
+        else:
+            good_inputs, bad_inputs = wallet.import_private_keys(keys, password)
+            return {
+                "good_keys": len(good_inputs),
+                "bad_keys": len(bad_inputs),
+            }
 
     def _resolver(self, x, wallet: Abstract_Wallet):
         if x is None:
@@ -713,7 +735,7 @@ class Commands:
         """Verify a signature."""
         sig = base64.b64decode(signature)
         message = util.to_bytes(message)
-        return ecc.verify_message_with_address(address, sig, message)
+        return bitcoin.verify_usermessage_with_address(address, sig, message)
 
     @command('wp')
     async def payto(self, destination, amount, fee=None, feerate=None, from_addr=None, from_coins=None, change_addr=None,
@@ -907,7 +929,7 @@ class Commands:
         except TypeError:
             raise UserFacingException(f"message must be a string-like object instead of {repr(message)}")
         public_key = ecc.ECPubkey(bfh(pubkey))
-        encrypted = public_key.encrypt_message(message)
+        encrypted = crypto.ecies_encrypt_message(public_key, message)
         return encrypted.decode('utf-8')
 
     @command('wp')
@@ -1156,8 +1178,8 @@ class Commands:
         invoice = Invoice.from_bech32(invoice)
         return invoice.to_debug_json()
 
-    @command('wnl')
-    async def lnpay(self, invoice, timeout=120, wallet: Abstract_Wallet = None):
+    @command('wnpl')
+    async def lnpay(self, invoice, timeout=120, password=None, wallet: Abstract_Wallet = None):
         lnworker = wallet.lnworker
         lnaddr = lnworker._check_invoice(invoice)
         payment_hash = lnaddr.paymenthash
@@ -1224,15 +1246,15 @@ class Commands:
             self.network.path_finder.liquidity_hints.reset_liquidity_hints()
             self.network.path_finder.clear_blacklist()
 
-    @command('wnl')
-    async def close_channel(self, channel_point, force=False, wallet: Abstract_Wallet = None):
+    @command('wnpl')
+    async def close_channel(self, channel_point, force=False, password=None, wallet: Abstract_Wallet = None):
         txid, index = channel_point.split(':')
         chan_id, _ = channel_id_from_funding_tx(txid, int(index))
         coro = wallet.lnworker.force_close_channel(chan_id) if force else wallet.lnworker.close_channel(chan_id)
         return await coro
 
-    @command('wnl')
-    async def request_force_close(self, channel_point, connection_string=None, wallet: Abstract_Wallet = None):
+    @command('wnpl')
+    async def request_force_close(self, channel_point, connection_string=None, password=None, wallet: Abstract_Wallet = None):
         """
         Requests the remote to force close a channel.
         If a connection string is passed, can be used without having state or any backup for the channel.
@@ -1242,8 +1264,8 @@ class Commands:
         chan_id, _ = channel_id_from_funding_tx(txid, int(index))
         await wallet.lnworker.request_force_close(chan_id, connect_str=connection_string)
 
-    @command('wl')
-    async def export_channel_backup(self, channel_point, wallet: Abstract_Wallet = None):
+    @command('wpl')
+    async def export_channel_backup(self, channel_point, password=None, wallet: Abstract_Wallet = None):
         txid, index = channel_point.split(':')
         chan_id, _ = channel_id_from_funding_tx(txid, int(index))
         return wallet.lnworker.export_channel_backup(chan_id)
@@ -1252,8 +1274,8 @@ class Commands:
     async def import_channel_backup(self, encrypted, wallet: Abstract_Wallet = None):
         return wallet.lnworker.import_channel_backup(encrypted)
 
-    @command('wnl')
-    async def get_channel_ctx(self, channel_point, iknowwhatimdoing=False, wallet: Abstract_Wallet = None):
+    @command('wnpl')
+    async def get_channel_ctx(self, channel_point, password=None, iknowwhatimdoing=False, wallet: Abstract_Wallet = None):
         """ return the current commitment transaction of a channel """
         if not iknowwhatimdoing:
             raise UserFacingException(
@@ -1270,8 +1292,8 @@ class Commands:
         """ return the local watchtower's ctn of channel. used in regtests """
         return await self.network.local_watchtower.sweepstore.get_ctn(channel_point, None)
 
-    @command('wnl')
-    async def rebalance_channels(self, from_scid, dest_scid, amount, wallet: Abstract_Wallet = None):
+    @command('wnpl')
+    async def rebalance_channels(self, from_scid, dest_scid, amount, password=None, wallet: Abstract_Wallet = None):
         """
         Rebalance channels.
         If trampoline is used, channels must be with different trampolines.
@@ -1296,7 +1318,6 @@ class Commands:
     async def normal_swap(self, onchain_amount, lightning_amount, password=None, wallet: Abstract_Wallet = None):
         """
         Normal submarine swap: send on-chain BTC, receive on Lightning
-        Note that your funds will be locked for 24h if you do not have enough incoming capacity.
         """
         sm = wallet.lnworker.swap_manager
         if lightning_amount == 'dryrun':
@@ -1323,8 +1344,8 @@ class Commands:
             'onchain_amount': format_satoshis(onchain_amount_sat),
         }
 
-    @command('wnl')
-    async def reverse_swap(self, lightning_amount, onchain_amount, wallet: Abstract_Wallet = None):
+    @command('wnpl')
+    async def reverse_swap(self, lightning_amount, onchain_amount, password=None, wallet: Abstract_Wallet = None):
         """Reverse submarine swap: send on Lightning, receive on-chain
         """
         sm = wallet.lnworker.swap_manager
@@ -1469,7 +1490,6 @@ command_options = {
     'from_amount': (None, "Amount to convert (default: 1)"),
     'from_ccy':    (None, "Currency to convert from"),
     'to_ccy':      (None, "Currency to convert to"),
-    'unlock':      (None, "Unlock the wallet (store the password in memory)."),
     'public':      (None, 'Channel will be announced'),
 }
 
@@ -1588,6 +1608,7 @@ def add_global_options(parser):
     group.add_argument("-D", "--dir", dest="electrum_path", help="electrum directory")
     group.add_argument("-P", "--portable", action="store_true", dest="portable", default=False, help="Use local 'electrum_data' directory")
     group.add_argument("--testnet", action="store_true", dest="testnet", default=False, help="Use Testnet")
+    group.add_argument("--testnet4", action="store_true", dest="testnet4", default=False, help="Use Testnet4")
     group.add_argument("--regtest", action="store_true", dest="regtest", default=False, help="Use Regtest")
     group.add_argument("--simnet", action="store_true", dest="simnet", default=False, help="Use Simnet")
     group.add_argument("--signet", action="store_true", dest="signet", default=False, help="Use Signet")

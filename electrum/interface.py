@@ -44,7 +44,7 @@ from aiorpcx.jsonrpc import JSONRPC, CodeMessageError
 from aiorpcx.rawsocket import RSClient
 import certifi
 
-from .util import (ignore_exceptions, log_exceptions, bfh, MySocksProxy,
+from .util import (ignore_exceptions, log_exceptions, bfh, ESocksProxy,
                    is_integer, is_non_negative_integer, is_hash256_str, is_hex_str,
                    is_int_or_float, is_non_negative_int_or_float, OldTaskGroup)
 from . import util
@@ -375,7 +375,7 @@ class Interface(Logger):
 
     LOGGING_SHORTCUT = 'i'
 
-    def __init__(self, *, network: 'Network', server: ServerAddr, proxy: Optional[dict]):
+    def __init__(self, *, network: 'Network', server: ServerAddr):
         self.ready = network.asyncio_loop.create_future()
         self.got_disconnected = asyncio.Event()
         self.server = server
@@ -394,8 +394,9 @@ class Interface(Logger):
         #         addresses...? e.g. 192.168.x.x
         if util.is_localhost(server.host):
             self.logger.info(f"looks like localhost: not using proxy for this server")
-            proxy = None
-        self.proxy = MySocksProxy.from_proxy_dict(proxy)
+            self.proxy = None
+        else:
+            self.proxy = ESocksProxy.from_network_settings(network)
 
         # Latest block header and corresponding height, as claimed by the server.
         # Note that these values are updated before they are verified.
@@ -443,10 +444,14 @@ class Interface(Logger):
             await self.open_session(ca_ssl_context, exit_early=True)
         except ConnectError as e:
             cause = e.__cause__
-            if isinstance(cause, ssl.SSLError) and cause.reason == 'CERTIFICATE_VERIFY_FAILED':
-                # failures due to self-signed certs are normal
+            if (isinstance(cause, ssl.SSLCertVerificationError)
+                    and cause.reason == 'CERTIFICATE_VERIFY_FAILED'
+                    and cause.verify_code == 18):  # "self signed certificate"
+                # Good. We will use this server as self-signed.
                 return False
+            # Not good. Cannot use this server.
             raise
+        # Good. We will use this server as CA-signed.
         return True
 
     async def _try_saving_ssl_cert_for_first_time(self, ca_ssl_context):
@@ -509,6 +514,9 @@ class Interface(Logger):
         else:
             # pinned self-signed cert
             sslc = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=self.cert_path)
+            # note: Flag "ssl.VERIFY_X509_STRICT" is enabled by default in python 3.13+ (disabled in older versions).
+            #       We explicitly disable it as it breaks lots of servers.
+            sslc.verify_flags &= ~ssl.VERIFY_X509_STRICT
             sslc.check_hostname = False
         return sslc
 
@@ -801,6 +809,7 @@ class Interface(Logger):
                         raise GracefulDisconnect('server chain conflicts with checkpoints or genesis')
                     last, height = await self.step(height)
                     continue
+                util.trigger_callback('blockchain_updated')
                 util.trigger_callback('network_updated')
                 height = (height // 2016 * 2016) + num_headers
                 assert height <= next_height+1, (height, self.tip)

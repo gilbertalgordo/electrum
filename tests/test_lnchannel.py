@@ -33,6 +33,7 @@ from electrum import lnpeer
 from electrum import lnchannel
 from electrum import lnutil
 from electrum import bip32 as bip32_utils
+from electrum.crypto import privkey_to_pubkey
 from electrum.lnutil import SENT, LOCAL, REMOTE, RECEIVED, UpdateAddHtlc
 from electrum.logging import console_stderr_handler
 from electrum.lnchannel import ChannelState
@@ -134,8 +135,8 @@ def create_test_channels(*, feerate=6000, local_msat=None, remote_msat=None,
     remote_amount = remote_msat if remote_msat is not None else (funding_sat * 1000 // 2)
     alice_raw = [bip32("m/" + str(i)) for i in range(5)]
     bob_raw = [bip32("m/" + str(i)) for i in range(5,11)]
-    alice_privkeys = [lnutil.Keypair(lnutil.privkey_to_pubkey(x), x) for x in alice_raw]
-    bob_privkeys = [lnutil.Keypair(lnutil.privkey_to_pubkey(x), x) for x in bob_raw]
+    alice_privkeys = [lnutil.Keypair(privkey_to_pubkey(x), x) for x in alice_raw]
+    bob_privkeys = [lnutil.Keypair(privkey_to_pubkey(x), x) for x in bob_raw]
     alice_pubkeys = [lnutil.OnlyPubkeyKeypair(x.pubkey) for x in alice_privkeys]
     bob_pubkeys = [lnutil.OnlyPubkeyKeypair(x.pubkey) for x in bob_privkeys]
 
@@ -613,7 +614,7 @@ class TestChannel(ElectrumTestCase):
         self.assertEqual(fee, bob_channel.get_oldest_unrevoked_feerate(LOCAL))
         self.assertEqual(fee, bob_channel.get_latest_feerate(LOCAL))
 
-    @unittest.skip("broken probably because we havn't implemented detecting when we come out of a situation where we violate reserve")
+    @unittest.skip("broken probably because we haven't implemented detecting when we come out of a situation where we violate reserve")
     def test_AddHTLCNegativeBalance(self):
         # the test in lnd doesn't set the fee to zero.
         # probably lnd subtracts commitment fee after deciding weather
@@ -707,7 +708,7 @@ class TestChanReserve(ElectrumTestCase):
         self.alice_channel = alice_channel
         self.bob_channel = bob_channel
 
-    @unittest.skip("broken probably because we havn't implemented detecting when we come out of a situation where we violate reserve")
+    @unittest.skip("broken probably because we haven't implemented detecting when we come out of a situation where we violate reserve")
     def test_part1(self):
         # Add an HTLC that will increase Bob's balance. This should succeed,
         # since Alice stays above her channel reserve, and Bob increases his

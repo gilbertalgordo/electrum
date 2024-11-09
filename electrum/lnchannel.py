@@ -33,7 +33,9 @@ import itertools
 from aiorpcx import NetAddress
 import attr
 
-from . import ecc
+import electrum_ecc as ecc
+from electrum_ecc import ECPubkey
+
 from . import constants, util
 from .util import bfh, chunks, TxMinedInfo
 from .invoices import PR_PAID
@@ -41,6 +43,7 @@ from .bitcoin import redeem_script_to_address
 from .crypto import sha256, sha256d
 from .transaction import Transaction, PartialTransaction, TxInput, Sighash
 from .logging import Logger
+from .lntransport import LNPeerAddr
 from .lnonion import OnionFailureCode, OnionRoutingFailure
 from . import lnutil
 from .lnutil import (Outpoint, LocalConfig, RemoteConfig, Keypair, OnlyPubkeyKeypair, ChannelConstraints,
@@ -50,7 +53,7 @@ from .lnutil import (Outpoint, LocalConfig, RemoteConfig, Keypair, OnlyPubkeyKey
                      HTLC_TIMEOUT_WEIGHT, HTLC_SUCCESS_WEIGHT, extract_ctn_from_tx_and_chan, UpdateAddHtlc,
                      funding_output_script, SENT, RECEIVED, LOCAL, REMOTE, HTLCOwner, make_commitment_outputs,
                      ScriptHtlc, PaymentFailure, calc_fees_for_commitment_tx, RemoteMisbehaving, make_htlc_output_witness_script,
-                     ShortChannelID, map_htlcs_to_ctx_output_idxs, LNPeerAddr,
+                     ShortChannelID, map_htlcs_to_ctx_output_idxs,
                      fee_for_htlc_output, offered_htlc_trim_threshold_sat,
                      received_htlc_trim_threshold_sat, make_commitment_output_to_remote_address,
                      ChannelType, LNProtocolWarning)
@@ -189,7 +192,6 @@ class AbstractChannel(Logger, ABC):
     funding_outpoint: Outpoint
     node_id: bytes  # note that it might not be the full 33 bytes; for OCB it is only the prefix
     _state: ChannelState
-    sweep_address: str
 
     def set_short_channel_id(self, short_id: ShortChannelID) -> None:
         self.short_channel_id = short_id
@@ -223,17 +225,17 @@ class AbstractChannel(Logger, ABC):
     def get_state(self) -> ChannelState:
         return self._state
 
-    def is_funded(self):
+    def is_funded(self) -> bool:
         return self.get_state() >= ChannelState.FUNDED
 
-    def is_open(self):
+    def is_open(self) -> bool:
         return self.get_state() == ChannelState.OPEN
 
-    def is_closed(self):
+    def is_closed(self) -> bool:
         # the closing txid has been saved
         return self.get_state() >= ChannelState.CLOSING
 
-    def is_redeemed(self):
+    def is_redeemed(self) -> bool:
         return self.get_state() == ChannelState.REDEEMED
 
     def need_to_subscribe(self) -> bool:
@@ -266,7 +268,7 @@ class AbstractChannel(Logger, ABC):
     def save_funding_height(self, *, txid: str, height: int, timestamp: Optional[int]) -> None:
         self.storage['funding_height'] = txid, height, timestamp
 
-    def get_funding_height(self):
+    def get_funding_height(self) -> Optional[Tuple[str, int, Optional[int]]]:
         return self.storage.get('funding_height')
 
     def delete_funding_height(self):
@@ -275,19 +277,19 @@ class AbstractChannel(Logger, ABC):
     def save_closing_height(self, *, txid: str, height: int, timestamp: Optional[int]) -> None:
         self.storage['closing_height'] = txid, height, timestamp
 
-    def get_closing_height(self):
+    def get_closing_height(self) -> Optional[Tuple[str, int, Optional[int]]]:
         return self.storage.get('closing_height')
 
     def delete_closing_height(self):
         self.storage.pop('closing_height', None)
 
-    def create_sweeptxs_for_our_ctx(self, ctx):
-        return create_sweeptxs_for_our_ctx(chan=self, ctx=ctx, sweep_address=self.sweep_address)
+    def create_sweeptxs_for_our_ctx(self, ctx: Transaction) -> Optional[Dict[str, SweepInfo]]:
+        return create_sweeptxs_for_our_ctx(chan=self, ctx=ctx, sweep_address=self.get_sweep_address())
 
-    def create_sweeptxs_for_their_ctx(self, ctx):
-        return create_sweeptxs_for_their_ctx(chan=self, ctx=ctx, sweep_address=self.sweep_address)
+    def create_sweeptxs_for_their_ctx(self, ctx: Transaction) -> Optional[Dict[str, SweepInfo]]:
+        return create_sweeptxs_for_their_ctx(chan=self, ctx=ctx, sweep_address=self.get_sweep_address())
 
-    def is_backup(self):
+    def is_backup(self) -> bool:
         return False
 
     def get_local_scid_alias(self, *, create_new_if_needed: bool = False) -> Optional[bytes]:
@@ -336,7 +338,7 @@ class AbstractChannel(Logger, ABC):
                 closing_height=closing_height,
                 keep_watching=keep_watching)
 
-    def update_unfunded_state(self):
+    def update_unfunded_state(self) -> None:
         self.delete_funding_height()
         self.delete_closing_height()
         if self.get_state() in [ChannelState.PREOPENING, ChannelState.OPENING, ChannelState.FORCE_CLOSING] and self.lnworker:
@@ -412,6 +414,14 @@ class AbstractChannel(Logger, ABC):
 
     @abstractmethod
     def get_funding_address(self) -> str:
+        pass
+
+    @abstractmethod
+    def get_sweep_address(self) -> str:
+        """Returns a wallet address we can use to sweep coins to.
+        It could be something static to the channel (fixed for its lifecycle),
+        or it might just ask the wallet now for an unused address.
+        """
         pass
 
     def get_state_for_GUI(self) -> str:
@@ -573,7 +583,7 @@ class ChannelBackup(AbstractChannel):
 
     def create_sweeptxs_for_our_ctx(self, ctx):
         if self.is_imported:
-            return create_sweeptxs_for_our_ctx(chan=self, ctx=ctx, sweep_address=self.sweep_address)
+            return create_sweeptxs_for_our_ctx(chan=self, ctx=ctx, sweep_address=self.get_sweep_address())
         else:
             # backup from op_return
             return {}
@@ -611,8 +621,7 @@ class ChannelBackup(AbstractChannel):
     def is_frozen_for_receiving(self) -> bool:
         return False
 
-    @property
-    def sweep_address(self) -> str:
+    def get_sweep_address(self) -> str:
         return self.lnworker.wallet.get_new_sweep_address_for_channel()
 
     def get_local_pubkey(self) -> bytes:
@@ -802,7 +811,7 @@ class Channel(AbstractChannel):
             timestamp=now(),
         )
         sighash = sha256d(chan_upd[2 + 64:])
-        sig = ecc.ECPrivkey(self.lnworker.node_keypair.privkey).sign(sighash, ecc.sig_string_from_r_and_s)
+        sig = ecc.ECPrivkey(self.lnworker.node_keypair.privkey).ecdsa_sign(sighash, sigencode=ecc.ecdsa_sig64_from_r_and_s)
         message_type, payload = decode_msg(chan_upd)
         payload['signature'] = sig
         chan_upd = encode_msg(message_type, **payload)
@@ -810,7 +819,7 @@ class Channel(AbstractChannel):
         self._outgoing_channel_update = chan_upd
         return chan_upd
 
-    def construct_channel_announcement_without_sigs(self) -> bytes:
+    def construct_channel_announcement_without_sigs(self) -> Tuple[bytes, bool]:
         bitcoin_keys = [
             self.config[REMOTE].multisig_key.pubkey,
             self.config[LOCAL].multisig_key.pubkey]
@@ -844,10 +853,8 @@ class Channel(AbstractChannel):
         channel_type = ChannelType(self.storage.get('channel_type'))
         return bool(channel_type & ChannelType.OPTION_ZEROCONF)
 
-    @property
-    def sweep_address(self) -> str:
+    def get_sweep_address(self) -> str:
         # TODO: in case of unilateral close with pending HTLCs, this address will be reused
-        addr = None
         assert self.is_static_remotekey_enabled()
         our_payment_pubkey = self.config[LOCAL].payment_basepoint.pubkey
         addr = make_commitment_output_to_remote_address(our_payment_pubkey)
@@ -1098,8 +1105,8 @@ class Channel(AbstractChannel):
                                                               commit=pending_remote_commitment,
                                                               ctx_output_idx=ctx_output_idx,
                                                               htlc=htlc)
-            sig = bfh(htlc_tx.sign_txin(0, their_remote_htlc_privkey))
-            htlc_sig = ecc.sig_string_from_der_sig(sig[:-1])
+            sig = htlc_tx.sign_txin(0, their_remote_htlc_privkey)
+            htlc_sig = ecc.ecdsa_sig64_from_der_sig(sig[:-1])
             htlcsigs.append((ctx_output_idx, htlc_sig))
         htlcsigs.sort()
         htlcsigs = [x[1] for x in htlcsigs]
@@ -1120,13 +1127,13 @@ class Channel(AbstractChannel):
         assert len(htlc_sigs) == 0 or type(htlc_sigs[0]) is bytes
 
         pending_local_commitment = self.get_next_commitment(LOCAL)
-        preimage_hex = pending_local_commitment.serialize_preimage(0)
-        pre_hash = sha256d(bfh(preimage_hex))
-        if not ecc.verify_signature(self.config[REMOTE].multisig_key.pubkey, sig, pre_hash):
+        pre_hash = pending_local_commitment.serialize_preimage(0)
+        msg_hash = sha256d(pre_hash)
+        if not ECPubkey(self.config[REMOTE].multisig_key.pubkey).ecdsa_verify(sig, msg_hash):
             raise LNProtocolWarning(
                 f'failed verifying signature for our updated commitment transaction. '
                 f'sig={sig.hex()}. '
-                f'pre_hash={pre_hash.hex()}. '
+                f'msg_hash={msg_hash.hex()}. '
                 f'pubkey={self.config[REMOTE].multisig_key.pubkey}. '
                 f'ctx={pending_local_commitment.serialize()} '
             )
@@ -1166,16 +1173,16 @@ class Channel(AbstractChannel):
                                                           commit=ctx,
                                                           ctx_output_idx=ctx_output_idx,
                                                           htlc=htlc)
-        preimage_hex = htlc_tx.serialize_preimage(0)
-        pre_hash = sha256d(bfh(preimage_hex))
+        pre_hash = htlc_tx.serialize_preimage(0)
+        msg_hash = sha256d(pre_hash)
         remote_htlc_pubkey = derive_pubkey(self.config[REMOTE].htlc_basepoint.pubkey, pcp)
-        if not ecc.verify_signature(remote_htlc_pubkey, htlc_sig, pre_hash):
+        if not ECPubkey(remote_htlc_pubkey).ecdsa_verify(htlc_sig, msg_hash):
             raise LNProtocolWarning(
                 f'failed verifying HTLC signatures: {htlc=}, {htlc_direction=}. '
                 f'htlc_tx={htlc_tx.serialize()}. '
                 f'htlc_sig={htlc_sig.hex()}. '
                 f'remote_htlc_pubkey={remote_htlc_pubkey.hex()}. '
-                f'pre_hash={pre_hash.hex()}. '
+                f'msg_hash={msg_hash.hex()}. '
                 f'ctx={ctx.serialize()}. '
                 f'ctx_output_idx={ctx_output_idx}. '
                 f'ctn={ctn}. '
@@ -1185,7 +1192,7 @@ class Channel(AbstractChannel):
         data = self.config[LOCAL].current_htlc_signatures
         htlc_sigs = list(chunks(data, 64))
         htlc_sig = htlc_sigs[htlc_relative_idx]
-        remote_htlc_sig = ecc.der_sig_from_sig_string(htlc_sig) + Sighash.to_sigbytes(Sighash.ALL)
+        remote_htlc_sig = ecc.ecdsa_der_sig_from_ecdsa_sig64(htlc_sig) + Sighash.to_sigbytes(Sighash.ALL)
         return remote_htlc_sig
 
     def revoke_current_commitment(self):
@@ -1413,10 +1420,10 @@ class Channel(AbstractChannel):
         ctn = self.get_oldest_unrevoked_ctn(subject)
         return self.get_commitment(subject, ctn=ctn)
 
-    def create_sweeptxs(self, ctn: int) -> List[Transaction]:
+    def create_sweeptxs_for_watchtower(self, ctn: int) -> List[Transaction]:
         from .lnsweep import create_sweeptxs_for_watchtower
         secret, ctx = self.get_secret_and_commitment(REMOTE, ctn=ctn)
-        return create_sweeptxs_for_watchtower(self, ctx, secret, self.sweep_address)
+        return create_sweeptxs_for_watchtower(self, ctx, secret, self.get_sweep_address())
 
     def get_oldest_unrevoked_ctn(self, subject: HTLCOwner) -> int:
         return self.hm.ctn_oldest_unrevoked(subject)
@@ -1586,8 +1593,8 @@ class Channel(AbstractChannel):
                 },
                 local_amount_msat=self.balance(LOCAL),
                 remote_amount_msat=self.balance(REMOTE) if not drop_remote else 0,
-                local_script=local_script.hex(),
-                remote_script=remote_script.hex(),
+                local_script=local_script,
+                remote_script=remote_script,
                 htlcs=[],
                 dust_limit_sat=self.config[LOCAL].dust_limit_sat)
 
@@ -1598,27 +1605,27 @@ class Channel(AbstractChannel):
                                      funding_sat=self.constraints.capacity,
                                      outputs=outputs)
 
-        der_sig = bfh(closing_tx.sign_txin(0, self.config[LOCAL].multisig_key.privkey))
-        sig = ecc.sig_string_from_der_sig(der_sig[:-1])
+        der_sig = closing_tx.sign_txin(0, self.config[LOCAL].multisig_key.privkey)
+        sig = ecc.ecdsa_sig64_from_der_sig(der_sig[:-1])
         return sig, closing_tx
 
     def signature_fits(self, tx: PartialTransaction) -> bool:
         remote_sig = self.config[LOCAL].current_commitment_signature
-        preimage_hex = tx.serialize_preimage(0)
-        msg_hash = sha256d(bfh(preimage_hex))
+        pre_hash = tx.serialize_preimage(0)
+        msg_hash = sha256d(pre_hash)
         assert remote_sig
-        res = ecc.verify_signature(self.config[REMOTE].multisig_key.pubkey, remote_sig, msg_hash)
+        res = ECPubkey(self.config[REMOTE].multisig_key.pubkey).ecdsa_verify(remote_sig, msg_hash)
         return res
 
     def force_close_tx(self) -> PartialTransaction:
         tx = self.get_latest_commitment(LOCAL)
         assert self.signature_fits(tx)
-        tx.sign({self.config[LOCAL].multisig_key.pubkey.hex(): (self.config[LOCAL].multisig_key.privkey, True)})
+        tx.sign({self.config[LOCAL].multisig_key.pubkey: self.config[LOCAL].multisig_key.privkey})
         remote_sig = self.config[LOCAL].current_commitment_signature
-        remote_sig = ecc.der_sig_from_sig_string(remote_sig) + Sighash.to_sigbytes(Sighash.ALL)
+        remote_sig = ecc.ecdsa_der_sig_from_ecdsa_sig64(remote_sig) + Sighash.to_sigbytes(Sighash.ALL)
         tx.add_signature_to_txin(txin_idx=0,
-                                 signing_pubkey=self.config[REMOTE].multisig_key.pubkey.hex(),
-                                 sig=remote_sig.hex())
+                                 signing_pubkey=self.config[REMOTE].multisig_key.pubkey,
+                                 sig=remote_sig)
         assert tx.is_complete()
         return tx
 
@@ -1643,7 +1650,7 @@ class Channel(AbstractChannel):
 
     def maybe_sweep_revoked_htlc(self, ctx: Transaction, htlc_tx: Transaction) -> Optional[SweepInfo]:
         # look at the output address, check if it matches
-        return create_sweeptx_for_their_revoked_htlc(self, ctx, htlc_tx, self.sweep_address)
+        return create_sweeptx_for_their_revoked_htlc(self, ctx, htlc_tx, self.get_sweep_address())
 
     def has_pending_changes(self, subject: HTLCOwner) -> bool:
         next_htlcs = self.hm.get_htlcs_in_next_ctx(subject)

@@ -3,11 +3,12 @@
 # file LICENCE or http://www.opensource.org/licenses/mit-license.php
 
 from decimal import Decimal
-from typing import Optional, TYPE_CHECKING, Sequence, List, Callable, Union
-from PyQt5.QtCore import pyqtSignal, QPoint, QSize, Qt
-from PyQt5.QtWidgets import (QLabel, QVBoxLayout, QGridLayout, QHBoxLayout,
+from typing import Optional, TYPE_CHECKING, Sequence, List, Callable, Union, Mapping
+
+from PyQt6.QtCore import pyqtSignal, QPoint, QSize, Qt
+from PyQt6.QtWidgets import (QLabel, QVBoxLayout, QGridLayout, QHBoxLayout,
                              QWidget, QToolTip, QPushButton, QApplication)
-from PyQt5.QtGui import QMovie, QColor
+from PyQt6.QtGui import QMovie, QColor
 
 from electrum.i18n import _
 from electrum.logging import Logger
@@ -19,6 +20,7 @@ from electrum.transaction import Transaction, PartialTxInput, PartialTxOutput
 from electrum.network import TxBroadcastError, BestEffortRequestFailed
 from electrum.payment_identifier import (PaymentIdentifierType, PaymentIdentifier, invoice_from_payment_identifier,
                                          payment_identifier_from_invoice)
+from electrum.submarine_swaps import SwapServerError
 
 from .amountedit import AmountEdit, BTCAmountEdit, SizedFreezableLineEdit
 from .paytoedit import InvalidPaymentIdentifier
@@ -131,7 +133,7 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
         self.paste_button.setIcon(read_QIcon('copy.png'))
         self.paste_button.setToolTip(_('Paste invoice from clipboard'))
         self.paste_button.setMaximumWidth(35)
-        self.paste_button.setFocusPolicy(Qt.NoFocus)
+        self.paste_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         grid.addWidget(self.paste_button, 0, 5)
 
         self.spinner = QMovie(icon_path('spinner.gif'))
@@ -141,7 +143,7 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
         self.spinner_l.setMargin(5)
         self.spinner_l.setVisible(False)
         self.spinner_l.setMovie(self.spinner)
-        grid.addWidget(self.spinner_l, 0, 1, 1, 4, Qt.AlignRight)
+        grid.addWidget(self.spinner_l, 0, 1, 1, 4, Qt.AlignmentFlag.AlignRight)
 
         self.save_button = EnterButton(_("Save"), self.do_save_invoice)
         self.save_button.setEnabled(False)
@@ -295,7 +297,7 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
             outputs: List[PartialTxOutput],
             *,
             nonlocal_only=False,
-            external_keypairs=None,
+            external_keypairs: Mapping[bytes, bytes] = None,
             get_coins: Callable[..., Sequence[PartialTxInput]] = None,
             invoice: Optional[Invoice] = None
     ) -> None:
@@ -336,7 +338,11 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
         if tx.has_dummy_output(DummyAddress.SWAP):
             sm = self.wallet.lnworker.swap_manager
             coro = sm.request_swap_for_tx(tx)
-            swap, invoice, tx = self.network.run_from_another_thread(coro)
+            try:
+                swap, invoice, tx = self.network.run_from_another_thread(coro)
+            except SwapServerError as e:
+                self.show_error(str(e))
+                return
             assert not tx.has_dummy_output(DummyAddress.SWAP)
             tx.swap_invoice = invoice
             tx.swap_payment_hash = swap.payment_hash
@@ -672,31 +678,31 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
                 can_pay_with_swap = lnworker.suggest_swap_to_send(amount_sat, coins=coins)
                 rebalance_suggestion = lnworker.suggest_rebalance_to_send(amount_sat)
                 can_rebalance = bool(rebalance_suggestion) and self.window.num_tasks() == 0
-            choices = {}
+            choices = []
             if can_rebalance:
                 msg = ''.join([
                     _('Rebalance existing channels'), '\n',
                     _('Move funds between your channels in order to increase your sending capacity.')
                 ])
-                choices[0] = msg
+                choices.append(('rebalance', msg))
             if can_pay_with_new_channel:
                 msg = ''.join([
                     _('Open a new channel'), '\n',
                     _('You will be able to pay once the channel is open.')
                 ])
-                choices[1] = msg
+                choices.append(('new_channel', msg))
             if can_pay_with_swap:
                 msg = ''.join([
                     _('Swap onchain funds for lightning funds'), '\n',
                     _('You will be able to pay once the swap is confirmed.')
                 ])
-                choices[2] = msg
+                choices.append(('swap', msg))
             if can_pay_onchain:
                 msg = ''.join([
                     _('Pay onchain'), '\n',
                     _('Funds will be sent to the invoice fallback address.')
                 ])
-                choices[3] = msg
+                choices.append(('onchain', msg))
             msg = _('You cannot pay that invoice using Lightning.')
             if lnworker and lnworker.channels:
                 num_sats_can_send = int(lnworker.num_sats_can_send())
@@ -709,16 +715,16 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
             r = self.window.query_choice(msg, choices)
             if r is not None:
                 self.save_pending_invoice()
-                if r == 0:
+                if r == 'rebalance':
                     chan1, chan2, delta = rebalance_suggestion
                     self.window.rebalance_dialog(chan1, chan2, amount_sat=delta)
-                elif r == 1:
+                elif r == 'new_channel':
                     amount_sat, min_amount_sat = can_pay_with_new_channel
                     self.window.new_channel_dialog(amount_sat=amount_sat, min_amount_sat=min_amount_sat)
-                elif r == 2:
+                elif r == 'swap':
                     chan, swap_recv_amount_sat = can_pay_with_swap
                     self.window.run_swap_dialog(is_reverse=False, recv_amount_sat=swap_recv_amount_sat, channels=[chan])
-                elif r == 3:
+                elif r == 'onchain':
                     self.pay_onchain_dialog(invoice.get_outputs(), nonlocal_only=True)
             return
 

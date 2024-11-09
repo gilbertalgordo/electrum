@@ -1,3 +1,92 @@
+# Release 4.5.8 (Oct 23, 2024)
+ * Qt Desktop GUI:
+   - fix: regression: bump_fee and dscancel dialogs erroring (#9273)
+
+
+# Release 4.5.7 (Oct 21, 2024)
+ * General:
+   - new: add new historical exchange rate providers: Bitfinex and Bitstamp
+   - fix: wizard regression: 2fa wallet setup erroring (#9253)
+   - fix: python 3.13 compat: could not connect to some self-signed electrum
+     servers with weird TLS certs. As workaround, set pre-3.13 behaviour (#9258)
+ * Lightning:
+   - fix: send update_fee right away after channel_reestablish (3a465593)
+     This fixes a race that can result in a force-closure if we try sending
+     a payment very soon after reestablishing the channel.
+ * Qt Desktop GUI:
+   - fix: show fee warnings also in the transaction dialog (c4fe2796)
+
+
+# Release 4.5.6 (Oct 16, 2024)
+ * General:
+   - new: add support for testnet4 (#9197)
+   - fix: wizard: allow passphrase for some '2fa' seeds (#9088)
+   - fix: trustedcoin wallet wizard continuation if file has keystore-only encryption (#9237)
+   - fix: trustedcoin: sanitize error messages coming from 2fa server
+   - fix: new wizard did not set keystore password if storage was not encrypted (#9147)
+   - changed: set stricter UNIX permissions for log files (fa8595b1)
+ * QML GUI (Android):
+   - new: show seed passphrase in WalletDetails (#9204)
+   - new: set max screen brightness when displaying QR codes (79c08536)
+   - fix: crash due to ConcurrentModificationException (450b9a0)
+   - fix: issue deactivating PIN when no wallet loaded (#8366)
+   - fix: only allow Channel Backup import on Lightning-enabled wallets (8d9bcda)
+ * Qt Desktop GUI:
+   - fix: scanning multi (privkeys, addresses) from QR (4dc64e4)
+ * Hardware wallets:
+   - ColdCard: new: export multisig wallet to coldcard over USB (#7682)
+   - Trezor:
+     - new: add support for new device "Safe 5" (#9171)
+     - update: fix compat with and bump pinned library to 0.13.9 (#9141)
+   - Ledger:
+     - new: add support for new device "Flex" (#9179)
+     - update: bump pinned library to 0.3.0, raise max lib to <0.4 (719292f8)
+   - Jade: update: bump library to 1.0.31 (9a84bb32)
+ * CLI/RPC:
+   - changed: require wallet password for lnpay and similar commands (#9236)
+     (This is in addition to the wallet needing to be loaded,
+     and requiring read access to the config file)
+ * Builds/binaries:
+   - changed: include unit tests in tarballs (#9207)
+   - android:
+     - changed: set target_sdk_version to 34 (2917fde5)
+     - update: bump python version (3.8->3.10) (08127a60)
+     - work towards F-Droid inclusion:
+       - reproducible apks: strip file path prefix from .pyc files (6ebdbf04)
+       - add fastlane metadata for f-droid (#9211)
+       - change versionCode calculation (#9221)
+       - build.gradle: set android.dependenciesInfo.includeInApk=false (af18df10)
+       - contrib/release_www.sh: put android versionCode in "version" file (#9233)
+
+
+# Release 4.5.5 (May 30, 2024)
+ * General:
+   - fix: timeout error shadowed by aiorpcx cancellation bug (#8954)
+   - changed: Fiat exchange rates: do not overwrite the locally saved historical
+     data. Instead, merge old and new data (a2fb70d6). This also ~fixes the
+     CoinGecko historical API by only asking for the last 365 days.
+   - update: support latest revision of SLIP-39 mnemonic spec (to restore) (#9059)
+ * Lightning:
+   - new: unify max fee bounds for payments, make it configurable (#9041)
+   - changed: trampoline fees: instead of hardcoded list, use
+     exponential search, capped by configurable budget (#9033)
+   - fix: opening new channels with peer that has .onion address (#9002)
+ * Dependencies:
+   - remove bitstring (#9020)
+ * QML GUI (Android):
+   - new: add tx options to ConfirmTxDialog, RbfBumpFeeDialog (#8909)
+   - various UI fixes (#9018, 472a65eb)
+ * Qt Desktop GUI:
+   - fix: save notes whenever modified (#8951)
+   - fix: offline 2fa wallet creation failing in some cases (#9037)
+   - various UI fixes (#8962, #8874, #9012, 1047200a, #9058)
+ * Hardware wallets:
+   - Bitbox02: fix: call pairing dialog when necessary (#8971)
+   - Jade: update: bump library to 1.0.29 (#9007)
+ * Binaries:
+   - new: add AppArmor profiles for tarball and AppImage (#9003)
+
+
 # Release 4.5.4 (March 14, 2024)
  * General:
     - fix: failing WalletDB upgrade(58) in 4.5.3 (#8913), for wallets with
@@ -272,7 +361,7 @@
     - Coins tab: New menu that lets users easily spend a selection
       of UTXOs into a new channel, or into a submarine swap (Qt GUI).
  * Internal:
-    - Lightning invoices are regenerated everytime routing hints are
+    - Lightning invoices are regenerated every time routing hints are
       deprecated due to liquidity changes.
     - Script descriptors are used internally to sign transactions.
 
@@ -672,7 +761,7 @@ below are user-visible.
  * Android PIN reset: If the password is unified, the PIN can be reset
    by providing the password.
  * Android: on-chain fees have been removed from the settings
-   dialog. Instead, the fee slider is shown to the user everytime an
+   dialog. Instead, the fee slider is shown to the user every time an
    on-chain transaction will be performed (sending a payment, opening
    a channel, initiating a submarine swap)
  * BIP-0350: use bech32m for witness version 1+ addresses (4315fa43).

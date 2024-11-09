@@ -18,14 +18,14 @@ class MockNetwork:
     def __init__(self):
         self.asyncio_loop = util.get_asyncio_loop()
         self.taskgroup = OldTaskGroup()
-
+        self.proxy = None
 
 class MockInterface(Interface):
     def __init__(self, config):
         self.config = config
         network = MockNetwork()
         network.config = config
-        super().__init__(network=network, server=ServerAddr.from_str('mock-server:50000:t'), proxy=None)
+        super().__init__(network=network, server=ServerAddr.from_str('mock-server:50000:t'))
         self.q = asyncio.Queue()
         self.blockchain = blockchain.Blockchain(config=self.config, forkpoint=0,
                                                 parent=None, forkpoint_hash=constants.net.GENESIS, prev_hash=None)
@@ -49,12 +49,12 @@ class TestNetwork(ElectrumTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        constants.set_regtest()
+        constants.BitcoinRegtest.set_as_network()
 
     @classmethod
     def tearDownClass(cls):
         super().tearDownClass()
-        constants.set_mainnet()
+        constants.BitcoinMainnet.set_as_network()
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
@@ -127,6 +127,6 @@ class TestNetwork(ElectrumTestCase):
         self.assertEqual(self.interface.q.qsize(), 0)
 
 
-if __name__=="__main__":
-    constants.set_regtest()
+if __name__ == "__main__":
+    constants.BitcoinRegtest.set_as_network()
     unittest.main()

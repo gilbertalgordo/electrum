@@ -5,6 +5,8 @@
 import hid
 from typing import TYPE_CHECKING, Dict, Tuple, Optional, List, Any, Callable
 
+import electrum_ecc as ecc
+
 from electrum import bip32, constants
 from electrum.i18n import _
 from electrum.keystore import Hardware_KeyStore
@@ -18,7 +20,6 @@ from electrum.storage import get_derivation_used_for_hw_device_encryption
 from electrum.bitcoin import OnchainOutputType
 
 import electrum.bitcoin as bitcoin
-import electrum.ecc as ecc
 
 from ..hw_wallet import HW_PluginBase, HardwareClientBase, HardwareHandlerBase
 
@@ -202,6 +203,14 @@ class BitBox02Client(HardwareClientBase):
 
     @runs_in_hwd_thread
     def get_password_for_storage_encryption(self) -> str:
+        if self.bitbox02_device is None:
+            self.pairing_dialog()
+
+        if self.bitbox02_device is None:
+            raise Exception(
+                "Need to setup communication first before attempting any BitBox02 calls"
+            )
+
         derivation = get_derivation_used_for_hw_device_encryption()
         derivation_list = bip32.convert_bip32_strpath_to_intpath(derivation)
         xpub = self.bitbox02_device.electrum_encryption_key(derivation_list)
@@ -528,8 +537,8 @@ class BitBox02Client(HardwareClientBase):
         # Fill signatures
         if len(sigs) != len(tx.inputs()):
             raise Exception("Incorrect number of inputs signed.")  # Should never occur
-        sighash = Sighash.to_sigbytes(Sighash.ALL).hex()
-        signatures = [ecc.der_sig_from_sig_string(x[1]).hex() + sighash for x in sigs]
+        sighash = Sighash.to_sigbytes(Sighash.ALL)
+        signatures = [ecc.ecdsa_der_sig_from_ecdsa_sig64(x[1]) + sighash for x in sigs]
         tx.update_signatures(signatures)
 
     def sign_message(self, keypath: str, message: bytes, script_type: str) -> bytes:

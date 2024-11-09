@@ -46,7 +46,7 @@ from .network import Network
 from .util import (json_decode, to_bytes, to_string, profiler, standardize_path, constant_time_compare, InvalidPassword)
 from .invoices import PR_PAID, PR_EXPIRED
 from .util import log_exceptions, ignore_exceptions, randrange, OldTaskGroup, UserFacingException, JsonRPCError
-from .util import EventListener, event_listener
+from .util import EventListener, event_listener, traceback_format_exception
 from .wallet import Wallet, Abstract_Wallet
 from .storage import WalletStorage
 from .wallet_db import WalletDB, WalletRequiresSplit, WalletRequiresUpgrade, WalletUnfinished
@@ -264,7 +264,7 @@ class AuthenticatedServer(Logger):
                 'message': "internal error while executing RPC",
                 'data': {
                     "exception": repr(e),
-                    "traceback": "".join(traceback.format_exception(e)),
+                    "traceback": "".join(traceback_format_exception(e)),
                 },
             }
         return web.json_response(response)
@@ -497,6 +497,7 @@ class Daemon(Logger):
         wallet = self._load_wallet(path, password, upgrade=upgrade, config=self.config)
         wallet.start_network(self.network)
         self.add_wallet(wallet)
+        self.update_recently_opened_wallets(path)
         return wallet
 
     @staticmethod
@@ -542,6 +543,7 @@ class Daemon(Logger):
         self.stop_wallet(path)
         if os.path.exists(path):
             os.unlink(path)
+            self.update_recently_opened_wallets(path, remove=True)
             return True
         return False
 
@@ -704,3 +706,14 @@ class Daemon(Logger):
         self._check_password_for_directory(
             old_password=old_password, new_password=new_password, wallet_dir=wallet_dir)
         return True
+
+    def update_recently_opened_wallets(self, wallet_path, *, remove: bool = False):
+        recent = self.config.RECENTLY_OPEN_WALLET_FILES or []
+        if wallet_path in recent:
+            recent.remove(wallet_path)
+        if not remove:
+            recent.insert(0, wallet_path)
+            recent = [path for path in recent if os.path.exists(path)]
+            recent = recent[:5]
+        self.config.RECENTLY_OPEN_WALLET_FILES = recent
+        util.trigger_callback('recently_opened_wallets_update')

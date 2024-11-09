@@ -1,20 +1,13 @@
 import threading
 import socket
 import base64
-import sys
 from typing import TYPE_CHECKING
 
-from electrum.gui.common_qt import get_qt_major_version
-
-if (qt_ver := get_qt_major_version()) == 5:
-    from PyQt5.QtCore import pyqtSignal, pyqtProperty, pyqtSlot
-elif qt_ver == 6:
-    from PyQt6.QtCore import pyqtSignal, pyqtProperty, pyqtSlot
-else:
-    raise Exception(f"unexpected {qt_ver=}")
+from PyQt6.QtCore import pyqtSignal, pyqtProperty, pyqtSlot
 
 from electrum.i18n import _
 from electrum.bip32 import BIP32Node
+from electrum import bitcoin
 
 from .trustedcoin import (server, ErrorConnectingServer, MOBILE_DISCLAIMER, TrustedCoinException)
 from electrum.gui.common_qt.plugins import PluginQObject
@@ -89,7 +82,7 @@ class TrustedcoinPluginQObject(PluginQObject):
         return self._billingModel
 
     def updateBillingInfo(self, wallet):
-        billingModel = []
+        billing_model = []
 
         price_per_tx = wallet.price_per_tx
         for k, v in sorted(price_per_tx.items()):
@@ -100,9 +93,9 @@ class TrustedcoinPluginQObject(PluginQObject):
                 'value': k,
                 'sats_per_tx': v / k
             }
-            billingModel.append(item)
+            billing_model.append(item)
 
-        self._billingModel = billingModel
+        self._billingModel = billing_model
         self.billingModelChanged.emit()
 
     @pyqtSlot()
@@ -208,7 +201,7 @@ class TrustedcoinPluginQObject(PluginQObject):
                 def f(xprv):
                     rootnode = BIP32Node.from_xkey(xprv)
                     key = rootnode.subkey_at_private_derivation((0, 0)).eckey
-                    sig = key.sign_message(message, True)
+                    sig = bitcoin.ecdsa_sign_usermessage(key, message, is_compressed=True)
                     return base64.b64encode(sig).decode()
 
                 signatures = [f(x) for x in [xprv1, xprv2]]

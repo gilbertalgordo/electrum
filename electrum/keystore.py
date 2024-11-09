@@ -32,7 +32,10 @@ from typing import Tuple, TYPE_CHECKING, Union, Sequence, Optional, Dict, List, 
 from functools import lru_cache, wraps
 from abc import ABC, abstractmethod
 
-from . import bitcoin, ecc, constants, bip32
+import electrum_ecc as ecc
+from electrum_ecc import string_to_number
+
+from . import bitcoin, constants, bip32
 from .bitcoin import deserialize_privkey, serialize_privkey, BaseDecodeError
 from .transaction import Transaction, PartialTransaction, PartialTxInput, PartialTxOutput, TxInput
 from .bip32 import (convert_bip32_strpath_to_intpath, BIP32_PRIME,
@@ -40,13 +43,13 @@ from .bip32 import (convert_bip32_strpath_to_intpath, BIP32_PRIME,
                     convert_bip32_intpath_to_strpath, is_xkey_consistent_with_key_origin_info,
                     KeyOriginInfo)
 from .descriptor import PubkeyProvider
-from .ecc import string_to_number
+from . import crypto
 from .crypto import (pw_decode, pw_encode, sha256, sha256d, PW_HASH_VERSION_LATEST,
                      SUPPORTED_PW_HASH_VERSIONS, UnsupportedPasswordHashVersion, hash_160,
                      CiphertextFormatError)
 from .util import (InvalidPassword, WalletFileException,
                    BitcoinException, bfh, inv_dict, is_hex_str)
-from .mnemonic import Mnemonic, Wordlist, seed_type, is_seed
+from .mnemonic import Mnemonic, Wordlist, calc_seed_type, is_seed
 from .plugin import run_hook
 from .logging import Logger
 
@@ -107,24 +110,24 @@ class KeyStore(Logger, ABC):
         """Returns whether the keystore can be encrypted with a password."""
         pass
 
-    def _get_tx_derivations(self, tx: 'PartialTransaction') -> Dict[str, Union[Sequence[int], str]]:
+    def _get_tx_derivations(self, tx: 'PartialTransaction') -> Dict[bytes, Union[Sequence[int], str]]:
         keypairs = {}
         for txin in tx.inputs():
             keypairs.update(self._get_txin_derivations(txin))
         return keypairs
 
-    def _get_txin_derivations(self, txin: 'PartialTxInput') -> Dict[str, Union[Sequence[int], str]]:
+    def _get_txin_derivations(self, txin: 'PartialTxInput') -> Dict[bytes, Union[Sequence[int], str]]:
         if txin.is_complete():
             return {}
         keypairs = {}
         for pubkey in txin.pubkeys:
-            if pubkey in txin.part_sigs:
+            if pubkey in txin.sigs_ecdsa:
                 # this pubkey already signed
                 continue
             derivation = self.get_pubkey_derivation(pubkey, txin)
             if not derivation:
                 continue
-            keypairs[pubkey.hex()] = derivation
+            keypairs[pubkey] = derivation
         return keypairs
 
     def can_sign(self, tx: 'Transaction', *, ignore_watching_only=False) -> bool:
@@ -223,12 +226,12 @@ class Software_KeyStore(KeyStore):
     def sign_message(self, sequence, message, password, *, script_type=None) -> bytes:
         privkey, compressed = self.get_private_key(sequence, password)
         key = ecc.ECPrivkey(privkey)
-        return key.sign_message(message, compressed)
+        return bitcoin.ecdsa_sign_usermessage(key, message, is_compressed=compressed)
 
     def decrypt_message(self, sequence, message, password) -> bytes:
         privkey, compressed = self.get_private_key(sequence, password)
         ec = ecc.ECPrivkey(privkey)
-        decrypted = ec.decrypt_message(message)
+        decrypted = crypto.ecies_decrypt_message(ec, message)
         return decrypted
 
     def sign_transaction(self, tx, password):
@@ -237,9 +240,11 @@ class Software_KeyStore(KeyStore):
         # Raise if password is not correct.
         self.check_password(password)
         # Add private keys
-        keypairs = self._get_tx_derivations(tx)
-        for k, v in keypairs.items():
-            keypairs[k] = self.get_private_key(v, password)
+        keypairs = {}
+        pubkey_to_deriv_map = self._get_tx_derivations(tx)
+        for pubkey, deriv in pubkey_to_deriv_map.items():
+            privkey, is_compressed = self.get_private_key(deriv, password)
+            keypairs[pubkey] = privkey
         # Sign
         if keypairs:
             tx.sign(keypairs)
@@ -378,7 +383,7 @@ class Deterministic_KeyStore(Software_KeyStore):
         if self.seed:
             raise Exception("a seed exists")
         self.seed = self.format_seed(seed)
-        self._seed_type = seed_type(seed) or None
+        self._seed_type = calc_seed_type(seed) or None
 
     def get_seed(self, password):
         if not self.has_seed():
@@ -1165,7 +1170,7 @@ def purpose48_derivation(account_id: int, xtype: str) -> str:
 
 def from_seed(seed: str, *, passphrase: Optional[str], for_multisig: bool = False):
     passphrase = passphrase or ""
-    t = seed_type(seed)
+    t = calc_seed_type(seed)
     if t == 'old':
         if passphrase:
             raise Exception("'old'-type electrum seed cannot have passphrase")

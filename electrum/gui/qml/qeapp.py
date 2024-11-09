@@ -29,7 +29,7 @@ from .qeqr import QEQRParser, QEQRImageProvider, QEQRImageProviderHelper
 from .qeqrscanner import QEQRScanner
 from .qebitcoin import QEBitcoin
 from .qefx import QEFX
-from .qetxfinalizer import QETxFinalizer, QETxRbfFeeBumper, QETxCpfpFeeBumper, QETxCanceller
+from .qetxfinalizer import QETxFinalizer, QETxRbfFeeBumper, QETxCpfpFeeBumper, QETxCanceller, QETxSweepFinalizer
 from .qeinvoice import QEInvoice, QEInvoiceParser
 from .qerequestdetails import QERequestDetails
 from .qetypes import QEAmount
@@ -146,13 +146,17 @@ class QEAppController(BaseCrashReporter, QObject):
             pass
 
     def doNotify(self, wallet_name, message):
+        self.logger.debug(f'sending push notification to OS: {message=!r}')
+        # FIXME: this does not work on Android 13+. We would need to declare (in manifest)
+        #        and also request-at-runtime android.permission.POST_NOTIFICATIONS.
         try:
             # TODO: lazy load not in UI thread please
             global notification
             if not notification:
                 from plyer import notification
-            icon = (os.path.dirname(os.path.realpath(__file__))
-                    + '/../icons/electrum.png')
+            icon = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "icons", "electrum.png",
+            )
             notification.notify('Electrum', message, app_icon=icon, app_name='Electrum')
         except ImportError:
             self.logger.warning('Notification: needs plyer; `sudo python3 -m pip install plyer`')
@@ -206,13 +210,38 @@ class QEAppController(BaseCrashReporter, QObject):
         it = jIntent.createChooser(sendIntent, cast('java.lang.CharSequence', jString(title)))
         jpythonActivity.startActivity(it)
 
+    @pyqtSlot()
+    def setMaxScreenBrightness(self):
+        self._set_screen_brightness(1.0)
+
+    @pyqtSlot()
+    def resetScreenBrightness(self):
+        self._set_screen_brightness(-1.0)
+
+    def _set_screen_brightness(self, br: float) -> None:
+        """br is the desired screen brightness, a value in the [0, 1] interval.
+        A negative value, e.g. -1.0, means a "reset" back to the system preferred value.
+        """
+        if not self.isAndroid():
+            return
+        from android.runnable import run_on_ui_thread
+
+        @run_on_ui_thread
+        def set_br():
+            window = jpythonActivity.getWindow()
+            attrs = window.getAttributes()
+            attrs.screenBrightness = br
+            window.setAttributes(attrs)
+        set_br()
+
     @pyqtSlot('QString')
     def textToClipboard(self, text):
         QGuiApplication.clipboard().setText(text)
 
     @pyqtSlot(result='QString')
     def clipboardToText(self):
-        return QGuiApplication.clipboard().text()
+        clip = QGuiApplication.clipboard()
+        return clip.text() if clip.mimeData().hasText() else ''
 
     @pyqtSlot(str, result=QObject)
     def plugin(self, plugin_name):
@@ -372,6 +401,7 @@ class ElectrumQmlApplication(QGuiApplication):
         qmlRegisterType(QETxRbfFeeBumper, 'org.electrum', 1, 0, 'TxRbfFeeBumper')
         qmlRegisterType(QETxCpfpFeeBumper, 'org.electrum', 1, 0, 'TxCpfpFeeBumper')
         qmlRegisterType(QETxCanceller, 'org.electrum', 1, 0, 'TxCanceller')
+        qmlRegisterType(QETxSweepFinalizer, 'org.electrum', 1, 0, 'SweepFinalizer')
         qmlRegisterType(QEBip39RecoveryListModel, 'org.electrum', 1, 0, 'Bip39RecoveryListModel')
 
         # TODO QT6: these were declared as uncreatable, but that doesn't seem to work for pyqt6
@@ -425,7 +455,7 @@ class ElectrumQmlApplication(QGuiApplication):
             "MEMPOOL_MB":            electrum.util.UI_UNIT_NAME_MEMPOOL_MB,
         })
 
-        self.plugins.load_plugin('trustedcoin')
+        self.plugins.load_internal_plugin('trustedcoin')
 
         qInstallMessageHandler(self.message_handler)
 

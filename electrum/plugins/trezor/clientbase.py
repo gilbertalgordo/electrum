@@ -1,7 +1,8 @@
 import time
 from struct import pack
 
-from electrum import ecc
+import electrum_ecc as ecc
+
 from electrum.i18n import _
 from electrum.util import UserCancelled, UserFacingException
 from electrum.keystore import bip39_normalize_passphrase
@@ -12,9 +13,17 @@ from electrum.plugins.hw_wallet.plugin import OutdatedHwFirmwareException, Hardw
 
 from trezorlib.client import TrezorClient, PASSPHRASE_ON_DEVICE
 from trezorlib.exceptions import TrezorFailure, Cancelled, OutdatedFirmwareError
-from trezorlib.messages import WordRequestType, FailureType, RecoveryDeviceType, ButtonRequestType
+from trezorlib.messages import WordRequestType, FailureType, ButtonRequestType
 import trezorlib.btc
 import trezorlib.device
+
+try:
+    # trezor >= 0.13.9
+    from trezorlib.messages import RecoveryDeviceInputMethod
+except ImportError:
+    # Backward compatibility for trezor < 0.13.9
+    from trezorlib.messages import RecoveryDeviceType as RecoveryDeviceInputMethod
+
 
 MESSAGES = {
     ButtonRequestType.ConfirmOutput:
@@ -346,7 +355,7 @@ class TrezorClientBase(HardwareClientBase, Logger):
         if recovery_type is None:
             return None
 
-        if recovery_type == RecoveryDeviceType.Matrix:
+        if recovery_type == RecoveryDeviceInputMethod.Matrix:
             return self._matrix_char
 
         step = 0

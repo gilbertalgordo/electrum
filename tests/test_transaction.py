@@ -1,14 +1,17 @@
+import json
+import os
 from typing import NamedTuple, Union
+
+from electrum_ecc import ECPrivkey
 
 from electrum import transaction, bitcoin
 from electrum.transaction import (convert_raw_tx_to_hex, tx_from_any, Transaction,
                                   PartialTransaction, TxOutpoint, PartialTxInput,
                                   PartialTxOutput, Sighash, match_script_against_template,
-                                  SCRIPTPUBKEY_TEMPLATE_ANYSEGWIT)
+                                  SCRIPTPUBKEY_TEMPLATE_ANYSEGWIT, TxOutput)
 from electrum.util import bfh
 from electrum.bitcoin import (deserialize_privkey, opcodes,
                               construct_script, construct_witness)
-from electrum.ecc import ECPrivkey
 from electrum import descriptor
 
 from .test_bitcoin import disable_ecdsa_r_value_grinding
@@ -18,7 +21,7 @@ signed_blob = '01000000012a5c9a94fcde98f5581cd00162c60a13936ceb75389ea65bf38633b
 v2_blob = "0200000001191601a44a81e061502b7bfbc6eaa1cef6d1e6af5308ef96c9342f71dbf4b9b5000000006b483045022100a6d44d0a651790a477e75334adfb8aae94d6612d01187b2c02526e340a7fd6c8022028bdf7a64a54906b13b145cd5dab21a26bd4b85d6044e9b97bceab5be44c2a9201210253e8e0254b0c95776786e40984c1aa32a7d03efa6bdacdea5f421b774917d346feffffff026b20fa04000000001976a914024db2e87dd7cfd0e5f266c5f212e21a31d805a588aca0860100000000001976a91421919b94ae5cefcdf0271191459157cdb41c4cbf88aca6240700"
 signed_segwit_blob = "01000000000101b66d722484f2db63e827ebf41d02684fed0c6550e85015a6c9d41ef216a8a6f00000000000fdffffff0280c3c90100000000160014b65ce60857f7e7892b983851c2a8e3526d09e4ab64bac30400000000160014c478ebbc0ab2097706a98e10db7cf101839931c4024730440220789c7d47f876638c58d98733c30ae9821c8fa82b470285dcdf6db5994210bf9f02204163418bbc44af701212ad42d884cc613f3d3d831d2d0cc886f767cca6e0235e012103083a6dc250816d771faa60737bfe78b23ad619f6b458e0a1f1688e3a0605e79c00000000"
 
-signed_blob_signatures = ['3046022100a82bbc57a0136751e5433f41cf000b3f1a99c6744775e76ec764fb78c54ee100022100f9e80b7de89de861dc6fb0c1429d5da72c2b6b2ee2406bc9bfb1beedd729d98501',]
+signed_blob_signatures = [bfh('3046022100a82bbc57a0136751e5433f41cf000b3f1a99c6744775e76ec764fb78c54ee100022100f9e80b7de89de861dc6fb0c1429d5da72c2b6b2ee2406bc9bfb1beedd729d98501'),]
 
 class TestBCDataStream(ElectrumTestCase):
 
@@ -81,11 +84,11 @@ class TestBCDataStream(ElectrumTestCase):
 
 class TestTransaction(ElectrumTestCase):
     def test_match_against_script_template(self):
-        script = bfh(construct_script([opcodes.OP_5, bytes(29)]))
+        script = construct_script([opcodes.OP_5, bytes(29)])
         self.assertTrue(match_script_against_template(script, SCRIPTPUBKEY_TEMPLATE_ANYSEGWIT))
-        script = bfh(construct_script([opcodes.OP_NOP, bytes(30)]))
+        script = construct_script([opcodes.OP_NOP, bytes(30)])
         self.assertFalse(match_script_against_template(script, SCRIPTPUBKEY_TEMPLATE_ANYSEGWIT))
-        script = bfh(construct_script([opcodes.OP_0, bytes(50)]))
+        script = construct_script([opcodes.OP_0, bytes(50)])
         self.assertFalse(match_script_against_template(script, SCRIPTPUBKEY_TEMPLATE_ANYSEGWIT))
 
     def test_tx_update_signatures(self):
@@ -875,9 +878,9 @@ class TestTransactionTestnet(ElectrumTestCase):
         prevout = TxOutpoint(txid=bfh('6d500966f9e494b38a04545f0cea35fc7b3944e341a64b804fed71cdee11d434'), out_idx=1)
         txin = PartialTxInput(prevout=prevout)
         txin.nsequence = 2 ** 32 - 3
-        redeem_script = bfh(construct_script([
+        redeem_script = construct_script([
             locktime, opcodes.OP_CHECKLOCKTIMEVERIFY, opcodes.OP_DROP, pubkey, opcodes.OP_CHECKSIG,
-        ]))
+        ])
         txin.redeem_script = redeem_script
 
         # Build the Transaction Output
@@ -887,7 +890,7 @@ class TestTransactionTestnet(ElectrumTestCase):
         # Build and sign the transaction
         tx = PartialTransaction.from_io([txin], [txout], locktime=locktime, version=1)
         sig = tx.sign_txin(0, privkey)
-        txin.script_sig = bfh(construct_script([sig, redeem_script]))
+        txin.script_sig = construct_script([sig, redeem_script])
 
         # note: in testnet3 chain, signature differs (no low-R grinding),
         # so txid there is: a8110bbdd40d65351f615897d98c33cbe33e4ebedb4ba2fc9e8c644423dadc93
@@ -903,10 +906,10 @@ class TestTransactionTestnet(ElectrumTestCase):
         # Build the Transaction Input
         _, privkey, compressed = deserialize_privkey(wif)
         pubkey = ECPrivkey(privkey).get_public_key_hex(compressed=compressed)
-        witness_script = bfh(construct_script([
+        witness_script = construct_script([
             locktime, opcodes.OP_CHECKLOCKTIMEVERIFY, opcodes.OP_DROP, pubkey, opcodes.OP_CHECKSIG,
-        ]))
-        from_addr = bitcoin.script_to_p2wsh(witness_script.hex())
+        ])
+        from_addr = bitcoin.script_to_p2wsh(witness_script)
         self.assertEqual("tb1q9dn6qke9924xe3zmptmhrdge0s043pjxpjndypgnu2t9fvsd4crs2qjuer", from_addr)
         prevout = TxOutpoint(txid=bfh('8680971efd5203025cffe746f8598d0a704fae81f236ffe009c2609ec673d59a'), out_idx=0)
         txin = PartialTxInput(prevout=prevout)
@@ -922,14 +925,14 @@ class TestTransactionTestnet(ElectrumTestCase):
         # Build and sign the transaction
         tx = PartialTransaction.from_io([txin], [txout], locktime=locktime, version=2)
         sig = tx.sign_txin(0, privkey)
-        txin.witness = bfh(construct_witness([sig, witness_script]))
+        txin.witness = construct_witness([sig, witness_script])
 
         self.assertEqual('1cdb274755b144090c7134b6459e8d4cb6b4552fe620102836d751e8389b2694',
                          tx.txid())
         self.assertEqual('020000000001019ad573c69e60c209e0ff36f281ae4f700a8d59f846e7ff5c020352fd1e97808600000000000000000001fa840100000000001600145a209b202bc19b3d345a75cf8ab51cb471913a790247304402207b191c1e3ff1a2d3541770b496c9f871406114746b3aa7347ec4ef0423d3a975022043d3a746fa7a794d97e95d74b6d17d618dfc4cd7644476813e08006f271e51bd012a046c4f855fb1752102aec53aa5f347219a7378b13006eb16ce48125f9cf14f04a5509a565ad5e51507ac6c4f855f',
                          tx.serialize())
 
-class TestSighashTypes(ElectrumTestCase):
+class TestSighashBIP143(ElectrumTestCase):
     #These tests are taken from bip143, https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki
     #Input of transaction
     locktime=0
@@ -949,7 +952,7 @@ class TestSighashTypes(ElectrumTestCase):
         tx = PartialTransaction.from_io(inputs=[self.txin], outputs=[self.txout1,self.txout2], locktime=self.locktime, version=1, BIP69_sort=False)
         sig = tx.sign_txin(0,privkey)
         self.assertEqual('304402206ac44d672dac41f9b00e28f4df20c52eeb087207e8d758d76d92c6fab3b73e2b0220367750dbbe19290069cba53d096f44530e4f98acaa594810388cf7409a1870ce01',
-                        sig)
+                         sig.hex())
 
     def test_check_sighash_types_sighash_none(self):
         self.txin.sighash=Sighash.NONE
@@ -957,7 +960,7 @@ class TestSighashTypes(ElectrumTestCase):
         tx = PartialTransaction.from_io(inputs=[self.txin], outputs=[self.txout1,self.txout2], locktime=self.locktime, version=1, BIP69_sort=False)
         sig = tx.sign_txin(0,privkey)
         self.assertEqual('3044022068c7946a43232757cbdf9176f009a928e1cd9a1a8c212f15c1e11ac9f2925d9002205b75f937ff2f9f3c1246e547e54f62e027f64eefa2695578cc6432cdabce271502',
-                        sig)
+                         sig.hex())
 
     def test_check_sighash_types_sighash_single(self):
         self.txin.sighash=Sighash.SINGLE
@@ -965,7 +968,7 @@ class TestSighashTypes(ElectrumTestCase):
         tx = PartialTransaction.from_io(inputs=[self.txin], outputs=[self.txout1,self.txout2], locktime=self.locktime, version=1, BIP69_sort=False)
         sig = tx.sign_txin(0,privkey)
         self.assertEqual('3044022059ebf56d98010a932cf8ecfec54c48e6139ed6adb0728c09cbe1e4fa0915302e022007cd986c8fa870ff5d2b3a89139c9fe7e499259875357e20fcbb15571c76795403',
-                        sig)
+                         sig.hex())
 
     @disable_ecdsa_r_value_grinding
     def test_check_sighash_types_sighash_all_anyonecanpay(self):
@@ -974,7 +977,7 @@ class TestSighashTypes(ElectrumTestCase):
         tx = PartialTransaction.from_io(inputs=[self.txin], outputs=[self.txout1,self.txout2], locktime=self.locktime, version=1, BIP69_sort=False)
         sig = tx.sign_txin(0,privkey)
         self.assertEqual('3045022100fbefd94bd0a488d50b79102b5dad4ab6ced30c4069f1eaa69a4b5a763414067e02203156c6a5c9cf88f91265f5a942e96213afae16d83321c8b31bb342142a14d16381',
-                         sig)
+                         sig.hex())
 
     @disable_ecdsa_r_value_grinding
     def test_check_sighash_types_sighash_none_anyonecanpay(self):
@@ -983,7 +986,7 @@ class TestSighashTypes(ElectrumTestCase):
         tx = PartialTransaction.from_io(inputs=[self.txin], outputs=[self.txout1,self.txout2], locktime=self.locktime, version=1, BIP69_sort=False)
         sig = tx.sign_txin(0,privkey)
         self.assertEqual('3045022100a5263ea0553ba89221984bd7f0b13613db16e7a70c549a86de0cc0444141a407022005c360ef0ae5a5d4f9f2f87a56c1546cc8268cab08c73501d6b3be2e1e1a8a0882',
-                         sig)
+                         sig.hex())
 
     def test_check_sighash_types_sighash_single_anyonecanpay(self):
         self.txin.sighash=Sighash.SINGLE|Sighash.ANYONECANPAY
@@ -991,4 +994,37 @@ class TestSighashTypes(ElectrumTestCase):
         tx = PartialTransaction.from_io(inputs=[self.txin], outputs=[self.txout1,self.txout2], locktime=self.locktime, version=1, BIP69_sort=False)
         sig = tx.sign_txin(0,privkey)
         self.assertEqual('30440220525406a1482936d5a21888260dc165497a90a15669636d8edca6b9fe490d309c022032af0c646a34a44d1f4576bf6a4a74b67940f8faa84c7df9abe12a01a11e2b4783',
-                         sig)
+                         sig.hex())
+
+
+class TestSighashBIP341(ElectrumTestCase):
+
+    def test_taproot_keypath_spending(self):
+        test_vector_file = os.path.join(os.path.dirname(__file__), "bip-0341", "wallet-test-vectors.json")
+        with open(test_vector_file, "r") as f:
+            vectors = json.load(f)
+        assert len(vectors["keyPathSpending"]) > 0, "test vectors missing"
+        for tcase in vectors["keyPathSpending"]:
+            unsigned_tx = Transaction(tcase["given"]["rawUnsignedTx"])
+            self.assertEqual(len(tcase["given"]["utxosSpent"]), len(unsigned_tx.inputs()))
+            tx = PartialTransaction.from_tx(unsigned_tx)
+            # add utxo data
+            for txin, json_utxo in zip(tx.inputs(), tcase["given"]["utxosSpent"]):
+                txin.witness_utxo = TxOutput(scriptpubkey=bfh(json_utxo["scriptPubKey"]), value=int(json_utxo["amountSats"]))
+            for txin_test in tcase["inputSpending"]:
+                txin_idx = txin_test["given"]["txinIndex"]
+                txin = tx.inputs()[txin_idx]
+                txin.sighash = int(txin_test["given"]["hashType"])
+                txin.tap_merkle_root = bfh(txin_test["given"]["merkleRoot"]) if txin_test["given"]["merkleRoot"] else None
+                pre_hash = tx.serialize_preimage(txin_idx)
+                self.assertEqual(txin_test["intermediary"]["sigMsg"], pre_hash.hex())
+                privkey = bfh(txin_test["given"]["internalPrivkey"])
+                sig = tx.sign_txin(txin_idx, privkey)
+                assert len(txin_test["expected"]["witness"]) == 1
+                self.assertEqual(txin_test["expected"]["witness"][0], sig.hex())
+                txin.witness = construct_witness([sig])
+                txin.script_sig = b""
+                self.assertTrue(txin.is_complete())
+            # note: some input utxos are not taproot, and there is no key data for them
+            #       - txin_idx=2, addr 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
+            #       - txin_idx=5, addr bc1q0ht9tyks4vh7p5p904t340cr9nvahy7u3re7zg
